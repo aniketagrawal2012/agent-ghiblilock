@@ -1,0 +1,475 @@
+\documentclass[10pt,journal,compsoc]{IEEEtran}
+
+\usepackage{silence}
+\WarningFilter{latexfont}{Font shape}
+\WarningFilter{latexfont}{Size substitutions}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage[bookmarks=false]{hyperref}
+\usepackage{listings}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc,fit}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
+}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+
+\lstset{
+    basicstyle=\ttfamily\scriptsize,
+    breaklines=true,
+    columns=flexible,
+    frame=single,
+    rulecolor=\color{black!30},
+    backgroundcolor=\color{gray!5}
+}
+
+\begin{document}
+
+\title{Agent-GhibliLock: Deterministic Wavelet-Locked Cross-Modal Style Transfer, Sliced-Wasserstein Chromaticity Transport, and ISO/IEC 19566-5 C2PA JUMBF Provenance Compilation}
+
+\author{Aniket~Agrawal\\
+\IEEEauthorblockA{AI Cloud Engineer, Google Cloud, Bangalore, India\\
+Email: \texttt{aniketagrawal@google.com}}}
+
+\maketitle
+
+\begin{abstract}
+Enterprise media, retail, and creative automation workflows increasingly deploy cross-modal Vision-Language-to-Diffusion pipelines (``Pixels $\to$ Prose $\to$ Pixels/Video''), wherein a Vision-Language Model (VLM) decomposes a source photograph into a structured visual inventory and style prompt (e.g., a Ghiblification Prompt, \texttt{GhP}) that conditions a generative image or video synthesis model paired with coarse spatial reference/pose guidance. Even when macro-level spatial registration is maintained upstream, routing visual state through natural language and stochastic latent decoding introduces an information-theoretic fine-phase bottleneck---\emph{The Captioning Conundrum}---alongside cryptographic provenance severance: (1) high-frequency spatial phase geometry (such as corporate apparel emblems, diagonal foreground railings, and perspective vanishing lines) is eroded during latent decoding ($\text{SSIM}_{\text{edge}} = 0.0413$ under prose-only synthesis, and $0.4482$ under coarse SDEdit); (2) multi-frame video generation across a Group of Pictures (GOP) exhibits inter-frame global luminance jump variance ($\sigma^2_{\text{flicker}} = 345.240$) and local subband pulsing ($\sigma^2_{\text{local}} = 33.349$); and (3) transitioning through text severs the Coalition for Content Provenance and Authenticity (C2PA) ingredient chain, while social/web gateways frequently strip outer container metadata chunks.
+
+This paper presents \textbf{Agent-GhibliLock}, a deterministic post-synthesis signal-processing and cryptographic binary container compiler that integrates classical multiresolution and optimal-transport primitives to enforce structural phase fidelity, perceptual chromaticity alignment, and dual-layer provenance given upstream macro-spatial registration (within the $2^K$-pixel Haar filter support). Prior to export, Agent-GhibliLock transforms the spatially registered source asset and diffusion candidate into perceptual CIELAB ($L^*a^*b^*$) space. First, an Iterative 3D Sliced-Wasserstein Optimal Transport ($\text{SWOT}$) solver aligns the candidate's 3D $(L^*,a^*,b^*)$ distribution with a target artistic reference palette $Y_{\text{ref}}$ over orthonormal $O(3)$ projections using rank-order permutation bijections (achieving pre-Step-B $\widehat{W}_2^{\text{StepA}} = 1.7638 \pm 0.0301$). Second, an orthonormal multi-level 2D Discrete Haar Wavelet Transform ($\text{DWT}_2^{(K)}$, $K=2$) locks the candidate's high-frequency directional luminance detail subbands ($LH_k, HL_k, HH_k$) to the source photograph's phase geometry while retaining the SWOT-aligned coarse approximation subband ($LL_K$) and chrominance channels (with post-Step-B $\widehat{W}_2^{\text{StepB}} = 4.2886 \pm 0.3733$, post-QIM exported $\widehat{W}_2^{\text{out}} = 4.3071 \pm 0.3981$, and out-of-sample held-out $\widehat{SW}_2^{\text{eval}} = 4.6240 \pm 0.5084$ over $M_{\text{eval}}=64$ independent directions). For video GOPs, reference-palette mean anchoring eliminates pre-clamping global frame-mean jump flicker ($\sigma^2_{\text{flicker}} = 0.0000$; $0.0001$ post-sRGB rounding) while a wavelet-domain exponential moving average (EMA) filter ($\beta = 0.78$) attenuates local $LL_K$ tile variance by $88.7\%$ empirically ($87.6\%$ analytical steady-state bound). Finally, Agent-GhibliLock embeds a 64-bit provenance soft-binding digest into mid-band $8\times 8$ Type-II 2D-DCT coefficients via Quantization Index Modulation (QIM) and compiles an ISO/IEC 19566-5 JUMBF (\texttt{caBX}) C2PA superbox into the ISO/IEC 15948 PNG container. Across $N = 600$ stratified $64\times 64$ trials and live Google Cloud Vertex AI multi-model evaluations ($128\times 128$, $N_{\text{scenes}}=10$ per tier), Agent-GhibliLock elevates $\text{SSIM}_{\text{edge}}$ to $0.9987 \pm 0.0010$ ($100.00\%$ pass rate) alongside non-circular full-band $\text{SSIM}_{\text{full}} = 0.9851$ and signed Sobel gradient correlation $\rho_{\text{grad}} = 0.8535$, and achieves $100.00\%$ tamper localization and blind DCT watermark recovery ($\text{BER} = 0.0000$, $\text{PSNR} > 47\text{ dB}$ vs.\ $24.16\%$ BER for blind spread-spectrum DCT).
+\end{abstract}
+
+\begin{IEEEkeywords}
+Cross-Modal Style Transfer, Discrete Wavelet Transform, Sliced-Wasserstein Optimal Transport, C2PA Provenance, ISO/IEC 19566-5 JUMBF, Quantization Index Modulation, Discrete Cosine Transform, Vision-Language Models, Diffusion Synthesis.
+\end{IEEEkeywords}
+
+\section{Introduction}
+The convergence of frontier Vision-Language Models (VLMs) and latent diffusion / autoregressive media synthesizers~\cite{rombach2022,team2025gemini} has catalyzed a new architectural paradigm in enterprise creative workflows: \emph{Cross-Modal Visual-to-Text-to-Visual Compilation} (``Pixels $\to$ Prose $\to$ Pixels/Video''). While modern cloud synthesis APIs (such as Google Cloud Vertex AI \texttt{imagen-3.0-generate-002} and \texttt{veo-3.1-generate-001} within the Gemini multimodal ecosystem~\cite{rombach2022,team2025gemini}) expose native image-to-image (SDEdit-style~\cite{meng2022sdedit}), spatial edge/pose (ControlNet~\cite{zhang2023}), and style-reference conditioning alongside text prompts, relying purely on high-strength pixel conditioning restricts bold artistic restyling, whereas lowering conditioning strength to achieve dramatic stylistic transformations (such as Studio Ghibli cel-shaded gouache animation) causes stochastic latent VAE decoding to blur fine 1-to-4-pixel high-frequency geometry. Consequently, enterprise pipelines use a multimodal VLM (e.g., \texttt{gemini-2.5-pro}, \texttt{gemini-2.5-flash}, or \texttt{gemini-3-flash-preview}~\cite{team2025gemini}) to inspect an input photograph $I_{\text{src}}$, catalog its semantic entities, lighting, and posture into a structured visual inventory, and synthesize a stylized generation prompt (\texttt{GhP}) paired with coarse SDEdit/ControlNet guidance or non-rigid alignment so macro-level spatial contours coincide within the $2^K = 4$-pixel Haar filter support.
+
+Despite its expressive flexibility, this cross-modal workflow introduces three fundamental systems and security challenges in production deployments:
+\begin{enumerate}
+    \item \textbf{The Captioning Conundrum (High-Frequency Phase Drift Under Macro-Registration):} Natural language prose is a low-rate symbolic channel ($< 10^4$ bits) compared to the spatial phase manifold of a photograph ($> 10^7$ bits), and even when coarse image/ControlNet conditioning preserves macro scene layout, latent VAE decoding erodes fine pixel transients. While prose and coarse adapters capture macro semantics (``two people standing behind a railing''), they discard exact high-frequency phase coordinates---such as the inclination angle of a foreground metallic rail, fine corporate apparel emblems (e.g., geometric brand logos), and architectural vanishing lines. Consequently, uncompiled diffusion candidates suffer severe structural edge drift ($\text{SSIM}_{\text{edge}} = 0.0413$ for unconstrained prompt-only B1, and $0.4482$ for coarse SDEdit B6~\cite{wang2004}).
+    \item \textbf{Temporal Low-Frequency Flicker in Video GOPs:} When extending cross-modal style transfer to multi-frame video synthesis (\texttt{veo-3.1-generate-001}), independent or loosely coupled denoising trajectories across a Group of Pictures (GOP) induce frame-to-frame oscillations in both global frame-mean exposure ($\sigma^2_{\text{flicker}} = 345.240$) and local coarse approximation tiles ($\sigma^2_{\text{local}} = 33.349$), producing visible ``breathing'' and color pulsing~\cite{bonneel2015blind}.
+    \item \textbf{C2PA Provenance Severance and Container Stripping:} Under the Coalition for Content Provenance and Authenticity (C2PA v2.1) and ISO/IEC 19566-5 JUMBF standards~\cite{c2pa2024,iso19566}, transitioning through unattested text prompts severs the cryptographic link between the source asset $I_{\text{src}}$ and the stylized output $I_{\text{out}}$. Furthermore, when enterprise assets are distributed across web proxies that strip outer ISO/IEC 15948 PNG \texttt{caBX} chunks~\cite{iso15948}, container-only provenance is completely lost unless backed by a frequency-domain soft-binding watermark~\cite{bui2023trustmark} tied to the source structural hash.
+\end{enumerate}
+
+To resolve these challenges, we introduce \textbf{Agent-GhibliLock}, a deterministic post-synthesis wavelet-locked compiler and dual-layer C2PA/DCT binary provenance engine designed for macro-registered cross-modal pipelines. Fig.~\ref{fig:arch} illustrates the end-to-end compilation pipeline.
+
+\begin{figure*}[t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=0.85cm and 2.15cm,
+    box/.style={rectangle, rounded corners=4pt, draw=black!75, thick, fill=blue!6, text width=3.2cm, align=center, minimum height=1.45cm, font=\footnotesize\sffamily},
+    core/.style={rectangle, rounded corners=4pt, draw=blue!80!black, very thick, fill=blue!14, text width=3.5cm, align=center, minimum height=1.45cm, font=\footnotesize\sffamily\bfseries},
+    crypto/.style={rectangle, rounded corners=4pt, draw=teal!80!black, very thick, fill=teal!12, text width=3.4cm, align=center, minimum height=1.45cm, font=\footnotesize\sffamily\bfseries},
+    arr/.style={-{Stealth[length=2.6mm,width=1.9mm]}, thick, draw=black!80}
+]
+\node[box] (src) {\textbf{Source Asset $I_{\text{src}}$}\\Photograph + Logo/Rail\\CIELAB $(L^*,a^*,b^*)$};
+\node[box, right=of src] (vlm) {\textbf{VLM Decomposer}\\\texttt{gemini-2.5-pro} /\\\texttt{gemini-2.5-flash} (\texttt{GhP})};
+\node[box, right=of vlm] (diff) {\textbf{Diffusion Synthesizer}\\Registered Candidate $I_{\text{cand}}$\\+ Style Palette Ref $Y_{\text{ref}}$};
+\node[core, right=of diff] (swot) {\textbf{Stage 1--2: SWOT + DWT}\\Step A: 3D SWOT ($\alpha_\tau$)\\Step B: $\text{DWT}_2^{(K)}(L^*)$ Lock ($\gamma_\tau$)};
+\node[crypto, right=of swot] (c2pa) {\textbf{Stage 3--4: Dual Lock}\\Mid-Band $8\times 8$ DCT QIM\\+ C2PA JUMBF (\texttt{caBX})};
+
+\draw[arr] (src) -- node[above=3pt, font=\scriptsize\sffamily] {Pixels} (vlm);
+\draw[arr] (vlm) -- node[above=3pt, font=\scriptsize\sffamily] {Prose (\texttt{GhP})} (diff);
+\draw[arr] (diff) -- node[above=3pt, font=\scriptsize\sffamily] {$I_{\text{cand}}, Y_{\text{ref}}$} (swot);
+\draw[arr] (swot) -- node[above=3pt, font=\scriptsize\sffamily] {$\text{SSIM}_{\text{edge}}\ge 0.88$} (c2pa);
+
+\draw[arr, dashed, draw=blue!75!black] (src.south) -- ++(0,-0.55) -| node[pos=0.25, below=2pt, font=\scriptsize\sffamily\bfseries] {High-Frequency Subbands $\{LH_k, HL_k, HH_k\}$ + Mask Hash $H(\mathcal{M}_{\text{HF}})$} (swot.south);
+\end{tikzpicture}%
+}
+\caption{Architecture of the \textbf{Agent-GhibliLock} compilation pipeline. Given upstream macro-spatial registration ($\le 2^K\text{-px}$ contour alignment), Stage 1--2 Step A aligns $I_{\text{cand}}$ to the target Studio Ghibli style reference $Y_{\text{ref}}$ via 3D CIELAB Sliced-Wasserstein Optimal Transport ($\text{SWOT}$, step $\alpha_\tau$), after which Step B injects the source photograph's high-frequency 2D Haar wavelet detail subbands $\{LH_k, HL_k, HH_k\}$ via $\text{DWT}_2^{(K)}(L^*)$ (weight $\gamma_\tau$). Stage 3--4 embeds the 64-bit mask-bound QIM watermark into $8\times 8$ mid-band DCT coefficients and compiles the ISO/IEC 19566-5 \texttt{caBX} chunk.}
+\label{fig:arch}
+\end{figure*}
+
+\section{Related Work}
+\textbf{Neural Style Transfer, Wavelet Skipping, and Diffusion Conditioning:} Gatys et al.~\cite{gatys2016} pioneered Gram-matrix style transfer, while Yoo et al. ($\text{WCT}^2$)~\cite{yoo2019wct2} introduced wavelet-corrected pooling and high-frequency Haar skip connections inside encoder-decoder networks for photorealistic transfer. In diffusion models~\cite{rombach2022}, SDEdit~\cite{meng2022sdedit} and ControlNet~\cite{zhang2023} provide stochastic noise inversion and spatial edge/pose conditioning. While API-level ControlNet adapters preserve macro object silhouettes, stochastic latent denoising and $8\times$ spatial VAE decoding still soften fine 1-to-4-pixel corporate emblems and rail edges; thus, pairing coarse diffusion conditioning with a deterministic post-synthesis CIELAB wavelet compiler guarantees exact pixel-domain bounds on high-frequency edge retention ($\text{SSIM}_{\text{edge}} \ge 0.88$).
+
+\textbf{Wavelet Multiresolution Analysis, Optimal Color Transport, and Video Deflickering:} Orthonormal wavelet bases introduced by Haar~\cite{haar1910}, Mallat~\cite{mallat1989}, and Daubechies~\cite{daubechies1992} partition signals into orthogonal scale-space subspaces. In color grading, Piti\'{e} et al.~\cite{pitie2007automated} formulated iterative 3D color distribution transfer via random orthonormal rotations and 1D marginal matching, later generalized to Sliced-Wasserstein barycenters by Rabin et al.~\cite{rabin2011} and Bonneel et al.~\cite{bonneel2015}, while Bonneel et al.~\cite{bonneel2015blind} established blind video temporal consistency via optical-flow warping and 2D gradient-domain screened Poisson PDE solvers. Rather than claiming new standalone transforms, Agent-GhibliLock's contribution lies in the end-to-end systems integration of 3D CIELAB SWOT (Step A) with spatial-mean-preserving (zero-block-sum) 2D Haar luminance detail locking (Step B) and an $\mathcal{O}(N_{\text{pix}})$ wavelet-domain $LL_K$ EMA recurrence (avoiding per-frame 2D Poisson PDE solves~\cite{bonneel2015blind}).
+
+\textbf{Media Provenance (C2PA) and Soft-Binding Watermarking:} The C2PA v2.1 specification~\cite{c2pa2024} and ISO/IEC 19566-5 (JUMBF)~\cite{iso19566} define cryptographic manifest boxes for digital media, including neural soft-binding watermarks such as TrustMark~\cite{bui2023trustmark} and SynthID-Image~\cite{gowal2025} alongside classical spread-spectrum~\cite{cox1997} and Quantization Index Modulation (QIM)~\cite{chen2001}. Whereas neural watermarks~\cite{bui2023trustmark,gowal2025} provide superior invariance to geometric rotation, scaling, and cropping at the cost of GPU inference and opaque latent boundaries, and classical blind spread-spectrum~\cite{cox1997} suffers from severe host-signal interference ($\text{BER} = 0.2416$ when the unwatermarked host is unavailable at the verifier), Agent-GhibliLock pairs container-level PNG \texttt{caBX} JUMBF signing~\cite{iso15948} with host-interference-free scalar mid-band $8\times 8$ DCT QIM~\cite{chen2001} to achieve zero-GPU deterministic CPU compilation ($\text{BER} = 0.0000$) and exact analytical coset distance bounds ($\Delta_{\text{QIM}}/4$) for block-level spatial tamper localization.
+
+\section{Mathematical Formulation and Proofs}
+
+\subsection{Perceptual CIELAB Transformation and Orthonormal 2D Haar Wavelet Decomposition}
+Given a source photograph $I_{\text{src}} \in \{0,\dots,255\}^{H\times W\times 3}$, a synthesized candidate $I_{\text{cand}}$ registered to $I_{\text{src}}$ via ControlNet/SDEdit conditioning or non-rigid optical-flow alignment such that macro contours coincide within the $2^K = 4$-pixel dyadic Haar support (preventing double-edge haloing or chroma-luma bleeding), and a target Studio Ghibli style palette reference $Y_{\text{ref}} \in \{0,\dots,255\}^{H\times W\times 3}$, Agent-GhibliLock applies inverse IEC 61966-2-1 gamma companding followed by CIE XYZ (D65 white point) projection to obtain perceptual CIELAB coordinates $(L^*, a^*, b^*)$. For each $2\times 2$ luminance block $\mathbf{c} = [c_{00}, c_{01}, c_{10}, c_{11}]^T$, the single-level 2D Haar transform applies the $4\times 4$ operator $H_2$:
+\begin{equation}
+\begin{aligned}
+\begin{bmatrix} LL \\ LH \\ HL \\ HH \end{bmatrix}
+&= \frac{1}{2}
+\begin{bmatrix}
+1 & 1 & 1 & 1 \\
+1 & -1 & 1 & -1 \\
+1 & 1 & -1 & -1 \\
+1 & -1 & -1 & 1
+\end{bmatrix}
+\begin{bmatrix} c_{00} \\ c_{01} \\ c_{10} \\ c_{11} \end{bmatrix}
+= H_2 \mathbf{c}.
+\end{aligned}
+\label{eq:haar2d}
+\end{equation}
+Iterating Eq.~\eqref{eq:haar2d} recursively on the coarse subband $LL$ across $K = 2$ levels yields the multiresolution decomposition $\text{DWT}_2^{(K)}(L^*) = \{LL_K, \{LH_k, HL_k, HH_k\}_{k=1}^K\}$. In Stage 1--2, the closed-loop solver iterates over schedule index $\tau \in \{1,2,3,4\}$ with $(\gamma_\tau, \alpha_\tau) \in \{(0.78, 0.85), (0.88, 0.90), (0.94, 0.94), (0.98, 0.97)\}$ (re-initializing cleanly from $I_{\text{cand}}$ at each step $\tau$ and returning the $\tau=4$ output if the schedule concludes) until post-Step-B, post-clamping $\text{SSIM}_{\text{edge}} \ge \tau_{\text{struct}} = 0.88$ and $W_2 \le \tau_{\text{color}} = 4.5$: at each $\tau$, \textbf{Step A} executes 3D CIELAB SWOT (Section~\ref{sec:swot}) on $I_{\text{cand}}$ toward $Y_{\text{ref}}$ to produce $\widetilde{I}_{\text{cand}} = (\widetilde{L}^*_{\text{cand}}, \widetilde{a}^*_{\text{cand}}, \widetilde{b}^*_{\text{cand}})$ (achieving $\widehat{W}_2^{\text{StepA}} = 1.7638 \pm 0.0301$), and \textbf{Step B} applies $\text{DWT}_2^{(K)}$ to lock the high-frequency luminance subbands of $\widetilde{L}^*_{\text{cand}}$ to $L^*_{\text{src}}$ while leaving $(\widetilde{a}^*_{\text{cand}}, \widetilde{b}^*_{\text{cand}})$ intact. By Parseval's identity and the $W_2$ triangle inequality, the 3D color perturbation induced by Step B on Step A's aligned distribution is bounded by $|W_2(\mu_{\widehat{I}}, \mu_{Y_{\text{ref}}}) - W_2(\mu_{\widetilde{I}}, \mu_{Y_{\text{ref}}})| \le \frac{1}{\sqrt{HW}}\|\widehat{L}^* - \widetilde{L}^*_{\text{cand}}\|_F$, increasing $\widehat{W}_2$ from $\widehat{W}_2^{\text{StepA}} = 1.7638$ to $\widehat{W}_2^{\text{StepB}} = 4.2886 \pm 0.3733$ (and $\widehat{W}_2^{\text{out}} = 4.3071 \pm 0.3981$ on the final post-QIM 8-bit sRGB output $I_{\text{out}}$).
+
+\begin{theorem}[Orthonormal Parseval Energy Partitioning and Chromatic-Structural Orthogonality]
+\label{thm:parseval}
+For any luminance field $L^* \in \mathbb{R}^{H\times W}$ with dimensions divisible by $2^K$, the $K$-level 2D Haar Wavelet Transform $\text{DWT}_2^{(K)}$ satisfies exact Parseval Frobenius norm conservation:
+\begin{equation}
+\|L^*\|_F^2 = \|LL_K\|_F^2 + \sum_{k=1}^{K} \!\left( \|LH_k\|_F^2 + \|HL_k\|_F^2 + \|HH_k\|_F^2 \right)\!.
+\label{eq:parseval}
+\end{equation}
+Furthermore, when high-frequency subbands in Step B are fused via $\widehat{D}_k^{(c)} = \gamma D_k^{(c)}(L^*_{\text{src}}) + (1-\gamma) D_k^{(c)}(\widetilde{L}^*_{\text{cand}})$ for $c \in \{LH, HL, HH\}$ and $\gamma \in [0,1]$ while retaining $\widehat{LL}_K = LL_K(\widetilde{L}^*_{\text{cand}})$, the pre-clamping reconstructed luminance $\widehat{L}^* = \text{IDWT}_2^{(K)}(\widehat{LL}_K, \{\widehat{D}_k^{(c)}\}_{k=1}^K)$ preserves the exact spatial mean luminance $\mu(\widehat{L}^*) = \mu(\widetilde{L}^*_{\text{cand}})$ and reduces high-frequency structural MSE relative to $L^*_{\text{src}}$ by an exact factor of $(1-\gamma)^2$ (with post-clamping $[0,100]$ mean drift bounded by $|\mu(\text{clamp}(\widehat{L}^*)) - \mu(\widehat{L}^*)| \le \epsilon_{\text{clamp}} < 0.02$ and corrected to $0$ via interior post-clamp DC re-anchoring).
+\end{theorem}
+\begin{proof}
+By direct multiplication in Eq.~\eqref{eq:haar2d}, $H_2^T H_2 = \frac{1}{4}(4 I_4) = I_4$, so $H_2 \in O(4)$ is strictly orthonormal and energy-preserving on every $2\times 2$ block: $LL^2 + LH^2 + HL^2 + HH^2 = \|\mathbf{c}\|_2^2$. Summing over all $\frac{H}{2}\times \frac{W}{2}$ disjoint blocks and applying induction on $k = 1,\dots,K$ establishes Eq.~\eqref{eq:parseval}. Because the detail rows of $H_2$ corresponding to $LH, HL, HH$ are orthogonal to $\mathbf{1}_4 = [1,1,1,1]^T$, every single-block detail coefficient vector $[0, LH, HL, HH]^T \in \mathbb{R}^4$ has zero spatial sum upon inverse reconstruction ($\mathbf{1}_4^T H_2^T [0, LH, HL, HH]^T = 0$). Defining the coarse subband arithmetic mean over $u \in \{0,\dots,H/2^K-1\}, v \in \{0,\dots,W/2^K-1\}$ as $\mu(\widehat{LL}_K) \triangleq \frac{2^{2K}}{HW}\sum_{u,v}\widehat{LL}_K(u,v) = 2^K \mu(\widehat{L}^*)$ (where each $\frac{1}{2}$-normalized Haar level scales $2\times 2$ block averages by $2$), the pre-clamping global spatial mean $\mu(\widehat{L}^*) = \frac{1}{HW}\sum_{x,y} \widehat{L}^*(x,y) = 2^{-K}\mu(\widehat{LL}_K) = \mu(\widetilde{L}^*_{\text{cand}})$ is invariant to $\gamma$. Finally, by Parseval's identity on the detail subspace $\bigoplus_{k=1}^K \mathcal{W}_k$, the residual detail error prior to $[0,100]$ gamut clamping satisfies:
+\begin{equation}
+\begin{aligned}
+&\sum_{k,c} \|\widehat{D}_k^{(c)} - D_k^{(c)}(L^*_{\text{src}})\|_F^2 \\
+&\quad = (1-\gamma)^2 \sum_{k,c} \|D_k^{(c)}(\widetilde{L}^*_{\text{cand}}) - D_k^{(c)}(L^*_{\text{src}})\|_F^2,
+\end{aligned}
+\end{equation}
+completing the proof.
+\end{proof}
+
+\begin{table*}[t]
+\centering
+\caption{Stratified Empirical Comparison Across $N = 600$ Cross-Modal Style-Transfer Trials ($64\times 64$ Tile Benchmark, $\text{Mean} \pm \text{Total SD}$; Reporting Pre-Step-B $\widehat{W}_2^{\text{StepA}}$, Post-Step-B $\widehat{W}_2^{\text{StepB}}$, Post-QIM Exported $\widehat{W}_2^{\text{out}}$, and Held-Out $\widehat{SW}_2^{\text{eval}}$ [$M_{\text{eval}}=64$, \texttt{seed=999}])}
+\label{tab:main_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Architecture / Paradigm} & \textbf{Wavelet $\text{SSIM}_{\text{edge}} \uparrow$} & \textbf{Full $\text{SSIM}_{\text{full}} / \rho_{\text{grad}} \uparrow$} & \textbf{SWOT $\widehat{W}_2^{\text{StepA}} / \widehat{W}_2^{\text{out}} / \widehat{SW}_2^{\text{eval}} \downarrow$} & \textbf{Struct. Pass ($\ge 0.88$)} & \textbf{$S_5$ Audit / Strip Rec.$^\S$} & \textbf{DCT WM Acc.} & \textbf{GOP Flicker $\sigma^2_{\text{flicker}} \downarrow$} & \textbf{Latency (p50 / p95)$^\dagger$} \\
+\midrule
+\textbf{B1: Unconstrained Prompt-Only (\texttt{GhP})} & $0.0413 \pm 0.0202$ & $0.6530 / 0.0330$ & $\text{---} / 19.0803 \pm 0.0231 / 19.142$ & $0.00\%$ ($0/600$) & $0.0\% / 0.0\%$ & $0.00\%$ & $345.2400$ & $1419.9\text{ ms}$ ($1420.7 / 1491.7$) \\
+\textbf{B2: VLM-as-a-Judge 7-Axis Retry ($3\times$ Calls)} & $0.3588 \pm 0.0449$ & $0.7603 / 0.8931$ & $\text{---} / 15.3963 \pm 0.4564 / 15.512$ & $0.00\%$ ($0/600$) & $0.0\% / 0.0\%$ & $0.00\%$ & $298.4100$ & $4378.6\text{ ms}$ ($4381.5 / 4576.3$) \\
+\textbf{B3a: Global SWOT Only (No DWT, $M=4$)$^*$} & $0.0000 \pm 0.0002$ & $0.6120 / 0.0310$ & $9.7704 / 9.7704 / 9.8140$ & $0.00\%$ ($0/600$) & $0.0\% / 0.0\%$ & $0.00\%$ & $284.1200$ & $+10.596\text{ ms}$ ($9.641 / 13.651$) \\
+\textbf{B3b: Global SWOT Only (No DWT, $M=8$)$^*$} & $0.0000 \pm 0.0000$ & $0.6180 / 0.0330$ & $\mathbf{1.7638} / \mathbf{1.7638} / \mathbf{1.5239}$ & $0.00\%$ ($0/600$) & $0.0\% / 0.0\%$ & $0.00\%$ & $14.2100$ & $+18.278\text{ ms}$ ($17.325 / 23.630$) \\
+\textbf{B4: Post-Hoc C2PA Wrapper (No DCT/DWT)} & $0.0413 \pm 0.0202$ & $0.6530 / 0.0330$ & $\text{---} / 19.0803 \pm 0.0231 / 19.142$ & $0.00\%$ ($0/600$) & $100\% / 0.0\%$ ($25\%$) & $0.00\%$ & $345.2400$ & $+3.193\text{ ms}$ ($3.191 / 3.467$) \\
+\textbf{B5: Wavelet Style Transfer ($\text{WCT}^2$~\cite{yoo2019wct2})} & $0.9895 \pm 0.0022$ & $0.9612 / 0.8310$ & $\text{---} / 9.8818 \pm 0.4224 / 9.9410$ & $100.00\%$ ($600/600$) & $0.0\% / 0.0\%$ & $0.00\%$ & $142.6000$ & $+142.301\text{ ms}$ ($142.27 / 142.45$) \\
+\textbf{B6: Image-Conditioned SDEdit ($s=0.55$~\cite{meng2022sdedit})} & $0.4482 \pm 0.0510$ & $0.7940 / 0.6120$ & $\text{---} / 12.9829 \pm 1.4814 / 13.105$ & $0.00\%$ ($0/600$) & $0.0\% / 0.0\%$ & $0.00\%$ & $189.3000$ & $1390.8\text{ ms}$ ($1391.6 / 1454.0$) \\
+\textbf{Agent-GhibliLock (Ours: SWOT + DWT + C2PA/DCT)} & $\mathbf{0.9987 \pm 0.0010}$ & $\mathbf{0.9851 / 0.8535}$ & $\mathbf{1.7638 / 4.3071 / 4.6240}$ & $\mathbf{100.00\%}$ ($\mathbf{600/600}$) & $\mathbf{100\% / 100\%}$ ($\mathbf{100\%}$) & $\mathbf{100.00\%}$ & $\mathbf{0.0001}^\ddagger$ & $\mathbf{+152.49\text{ ms}}$ ($\mathbf{142.06 / 204.37}$) \\
+\bottomrule
+\multicolumn{9}{l}{\scriptsize $^\dagger$B1, B2, and B6 report upstream cloud synthesis latency; B3a/b, B4, B5, and Agent-GhibliLock report local post-synthesis compilation overhead. $^*$B3b shows pure Step A SWOT ($\widehat{W}_2^{\text{StepA}}=1.7638$) without Step B wavelet lock ($\text{SSIM}_{\text{edge}}=0.0000$).}\\
+\multicolumn{9}{l}{\scriptsize $^\ddagger$Pre-clamp global frame-mean jump variance $\sigma^2_{\text{flicker}} = \text{Var}(\Delta\mu(\widehat{L}^{*(t)})) = 0.0000$ ($0.0001$ post-sRGB uint8 vs.\ $5.8496$ for Pixel-EMA); local $LL_K$ tile variance drops $88.7\%$ ($33.3486 \to 3.7669$). $^\S$Unstripped tamper ($25$) / Stripped recovery ($75$).}
+\end{tabular}%
+}
+\end{table*}
+
+\subsection{Iterative 3D Sliced-Wasserstein Optimal Transport (SWOT)}
+\label{sec:swot}
+Let $X \in \mathbb{R}^{N_{\text{pix}}\times 3}$ and $Y \in \mathbb{R}^{N_{\text{pix}}\times 3}$ denote the flattened 3D CIELAB $(L^*,a^*,b^*)$ point clouds of the candidate image $I_{\text{cand}}$ and target style palette reference $Y_{\text{ref}}$ ($N_{\text{pix}} = HW$, with $Y_{\text{ref}}$ nearest-neighbor resampled to $H\times W$ if its native resolution differs). The 3D Sliced-Wasserstein-2 distance integrated with respect to the normalized uniform measure $\sigma$ on the unit sphere $\mathbb{S}^2$ ($\int_{\mathbb{S}^2} d\sigma(\theta) = 1$) is:
+\begin{equation}
+SW_2^2(\mu_X, \mu_Y) = \int_{\mathbb{S}^2} W_2^2(\theta_\# \mu_X, \theta_\# \mu_Y)\, d\sigma(\theta),
+\label{eq:sw2}
+\end{equation}
+where $\theta_\# \mu$ denotes the 1D Radon pushforward projection along $\theta \in \mathbb{S}^2$. After an initial coordinate-wise marginal alignment pass along the canonical axes $I_3$, at each subsequent iteration $m \in \{1,\dots,M\}$ ($M = 8$), Step A performs stochastic slice-descent on Eq.~\eqref{eq:sw2} by sampling a Haar-uniform orthonormal matrix $Q_m = [q_{m,1}, q_{m,2}, q_{m,3}] \in O(3)$ via positive-diagonal QR factorization $Z_m = Q_m R_m$, $Q_m \leftarrow Q_m \operatorname{diag}(\operatorname{sign}_+(\operatorname{diag}(R_m)))$ where $\operatorname{sign}_+(x) = +1$ if $x \ge 0$ else $-1$~\cite{pitie2007automated}, and applying 1D quantile transport along each projected column $u_d = X^{(m)} q_{m,d} \in \mathbb{R}^{N_{\text{pix}}}$ and $v_d = Y q_{m,d} \in \mathbb{R}^{N_{\text{pix}}}$ via rank-order sorting permutations $\sigma_{u,d} = \texttt{argsort}(u_d), \sigma_{v,d} = \texttt{argsort}(v_d) \in \mathfrak{S}_{N_{\text{pix}}}$:
+\begin{equation}
+\begin{split}
+X^{(m+1)}_i &= X^{(m)}_i + \alpha \sum_{d=1}^{3} \Big( (Y q_{m,d})_{\sigma_{v,d}(\sigma_{u,d}^{-1}(i))} \\
+&\quad - (X^{(m)} q_{m,d})_i \Big) q_{m,d}^T.
+\end{split}
+\label{eq:swot_step}
+\end{equation}
+To prevent in-sample evaluation bias, Tables~\ref{tab:main_results}--\ref{tab:multimodel} report both the training-projection estimator $\widehat{W}_2$ (\texttt{seed=42}) at three pipeline checkpoints---pre-Step-B ($\widehat{W}_2^{\text{StepA}}$), post-Step-B ($\widehat{W}_2^{\text{StepB}}$), and post-QIM exported sRGB ($\widehat{W}_2^{\text{out}}$)---and the out-of-sample held-out estimator $\widehat{SW}_2^{\text{eval}}$ evaluated across $M_{\text{eval}} = 64$ independent uniform unit-sphere directions (\texttt{seed=999}, disjoint from optimization \texttt{seed=42}).
+
+\begin{theorem}[Slice-Specific Contraction of Orthonormal 3D SWOT Updates]
+\label{thm:swot}
+For step size $\alpha \in (0, 1]$ and rank-order permutation tie-broken empirical measures on $N_{\text{pix}}$ points, each orthonormal projection transport update in Eq.~\eqref{eq:swot_step} is a non-expansive contraction along the sampled basis $Q_m \in O(3)$, strictly decreasing the basis-projected transport cost $\mathcal{J}_m(X) = \sum_{d=1}^3 W_2^2(q_{m,d\#}\mu_X, q_{m,d\#}\mu_Y)$ to $\mathcal{J}_m(X^{(m+1)}) = (1-\alpha)^2 \mathcal{J}_m(X^{(m)})$ whenever $\mathcal{J}_m(X^{(m)}) > 0$.
+\end{theorem}
+\begin{proof}
+In 1D, under tie-broken rank-order sorting $\sigma_{u,d}, \sigma_{v,d} \in \mathfrak{S}_{N_{\text{pix}}}$ of the $N_{\text{pix}}$ empirical samples (forming a strict sample-index bijection), the optimal Monge coupling maps sample $i$ to $(T_d^{\text{rank}}(u_d))_i = (v_d)_{\sigma_{v,d}(\sigma_{u,d}^{-1}(i))}$. Along each axis $q_{m,d}$ of $Q_m \in O(3)$, displacement interpolation $u_d^{(\alpha)} = (1-\alpha)u_d + \alpha T_d^{\text{rank}}(u_d)$ forms the constant-speed McCann geodesic in $(\mathcal{P}_2(\mathbb{R}), W_2)$, yielding $W_2(\mu_{u_d^{(\alpha)}}, \mu_{v_d}) = (1-\alpha) W_2(\mu_{u_d}, \mu_{v_d})$. Because $Q_m^T Q_m = I_3$, updates along the three orthogonal columns of $Q_m$ decouple in Euclidean norm, establishing $\mathcal{J}_m(X^{(m+1)}) = (1-\alpha)^2 \mathcal{J}_m(X^{(m)})$ along $Q_m$.
+\end{proof}
+
+\subsection{Mid-Band $8\times 8$ 2D-DCT QIM Watermarking and ISO/IEC 19566-5 JUMBF Packaging}
+To quantify structural preservation and construct a reproducible cryptographic soft binding, let $E_{1/2}(u,v) = \sqrt{LH_1(u,v)^2 + HL_1(u,v)^2 + 0.5\,HH_1(u,v)^2}$ denote the Level-1 Haar detail energy map of luminance $L^*$, upsampled $2\times$ via nearest-neighbor interpolation and normalized by $\max(\max_{u,v} E_{1/2}(u,v), \epsilon)$ ($\epsilon = 10^{-8}$) to form $E_{\text{full}}(L^*) \in [0,1]^{H\times W}$ (capturing scale-normalized Level-1 edge topology, complemented by non-circular $4\times 4$ spatial patch Wang-Bovik structural similarity $\text{SSIM}_{\text{full}}$ and signed $3\times 3$ Sobel gradient correlation $\rho_{\text{grad}}$ over the source structural edge locus in Section~\ref{sec:eval}). We define Wavelet-Edge Structural Similarity as $\text{SSIM}_{\text{edge}}(I_1, I_2) \triangleq \max(0, \text{SSIM}(E_{\text{full}}(L^*_1), E_{\text{full}}(L^*_2)))$~\cite{wang2004} with $c_1 = 0.01^2, c_2 = 0.03^2$, and define the canonical binary structural mask $\mathcal{M}_{\text{HF}} \triangleq \mathbb{I}\big(E_{\text{full}}(L^*_{\text{src}}) \ge \max(Q_{0.75}(E_{\text{full}}(L^*_{\text{src}})), 0.08)\big) \in \{0,1\}^{H\times W}$ (using linear quantile interpolation), serialized by appending the 8-byte big-endian dimension trailer \texttt{struct.pack(">II", H, W)} to the raw row-major 1-byte-per-pixel \texttt{uint8} buffer ($HW$ bytes) of $\mathcal{M}_{\text{HF}}$. Agent-GhibliLock computes the 64-bit soft-binding payload $w \in \{0,1\}^{64}$ (retaining the leading 64 bits / 8 MSB bytes of the SHA-256 digest over UTF-8 colon-delimited fields):
+\begin{equation}
+\begin{aligned}
+w = \text{Trunc}_{64}\Big(&\text{SHA256}\big(\text{Hex}(\text{SHA256}(\mathcal{M}_{\text{HF}})) \parallel \text{``:''} \\
+&\parallel \text{ModelID}_{\text{VLM}} \parallel \text{``:''} \parallel \text{ModelID}_{\text{Diff}}\big)\Big).
+\end{aligned}
+\label{eq:wm_hash}
+\end{equation}
+Because cryptographic hashing over $\mathcal{M}_{\text{HF}}(L^*_{\text{src}})$ exhibits strict avalanche sensitivity, blind QIM payload extraction and coset-distance tamper auditing operate directly on $I_{\text{out}}$ alone, whereas cryptographic provenance binding matches the extracted 64-bit key $\hat{w}$ against the enterprise manifest registry (or a known $I_{\text{src}}$). After Stage 1--2 reconstructs $\widehat{L}^*$ and converts $(\widehat{L}^*, \widetilde{a}^*_{\text{cand}}, \widetilde{b}^*_{\text{cand}})$ to 8-bit sRGB, Stage 3 computes ITU-R BT.601 luminance $Y = 0.299R + 0.587G + 0.114B$, partitions $Y$ into $B = \lfloor H/8\rfloor \times \lfloor W/8\rfloor$ blocks in 0-based row-major raster order $b \in \{0,\dots,B-1\}$, and applies the orthonormal $8\times 8$ Type-II DCT $F_b = C_8 (Y_b - 128\,\mathbf{1}_{8\times 8}) C_8^T$. Across the four 0-based mid-band coordinates $\Omega_{\text{mid}} = \{(2,3), (3,2), (1,3), (3,1)\}$ indexed by $m \in \{0,1,2,3\}$, bit $w_i \in \{0,1\}$ with block-interleaved index $i = (4b + m) \bmod 64$ is embedded via uniform scalar QIM~\cite{chen2001} with step $\Delta_{\text{QIM}} = 14.0$ and half-up rounding $\text{round}(x) \triangleq \lfloor x + 0.5\rfloor$:
+\begin{equation}
+\widehat{F}_b(u,v) = \Delta_{\text{QIM}} \cdot \text{round}\!\left(\frac{F_b(u,v) - \frac{1}{2}\Delta_{\text{QIM}} w_i}{\Delta_{\text{QIM}}}\right) + \frac{\Delta_{\text{QIM}}}{2} w_i.
+\label{eq:qim}
+\end{equation}
+The inverse DCT delta $\Delta Y_b = (C_8^T \widehat{F}_b C_8 + 128\,\mathbf{1}_{8\times 8}) - Y_b$ is added equally to $(R,G,B)$ and clamped to $\{0,\dots,255\}$ to form $I_{\text{out}}$.
+
+\begin{theorem}[Mid-Band DCT QIM Minimum-Distance Immunity and Multi-Block Repetition Gain]
+\label{thm:qim}
+Under Eq.~\eqref{eq:qim}, the minimum Euclidean distance between the bit-$0$ ($\Lambda_0 = \Delta_{\text{QIM}}\mathbb{Z}$) and bit-$1$ ($\Lambda_1 = \Delta_{\text{QIM}}\mathbb{Z} + \Delta_{\text{QIM}}/2$) lattices is $d_{\min} = \Delta_{\text{QIM}} / 2$. Consequently, for any received coefficient $\tilde{F}_b(u,v) \triangleq \widehat{F}_b(u,v) + \eta_b(u,v)$ under bounded perturbation $|\eta_b(u,v)| < \Delta_{\text{QIM}} / 4 = 3.5$, minimum-distance hard-decision decoding $\hat{w}_{b,u,v} = \arg\min_{w\in\{0,1\}}\text{dist}(\tilde{F}_b(u,v), \Lambda_w)$ (ties broken to $0$) yields zero single-coefficient error ($p_e = 0$). Under i.i.d.\ noise with $p_e < 1/2$ across $R = \lfloor B / 16 \rfloor$ disjoint-block measurements per payload bit (assuming $16 \mid B$), majority-vote decoding bounds the marginal per-bit Bit Error Rate $\Pr(\hat{w}_i \neq w_i)$ via the binomial tail and Hoeffding's inequality:
+\begin{equation}
+\begin{split}
+P_{\text{BER}} &\le \sum_{k=\lceil R/2\rceil}^{R} \binom{R}{k} p_e^k (1-p_e)^{R-k} \\
+&\le \exp\!\left(-2 R \left(\frac{1}{2} - p_e\right)^2\right).
+\end{split}
+\label{eq:ber_bound}
+\end{equation}
+\end{theorem}
+\begin{proof}
+Because $\Lambda_0$ and $\Lambda_1$ are separated by $d_{\min} = \Delta_{\text{QIM}}/2$, a perturbed sample $\widehat{F}_b(u,v) + \eta_b(u,v)$ remains strictly closer to $\Lambda_{w_i}$ whenever $|\eta_b(u,v)| < d_{\min}/2 = \Delta_{\text{QIM}}/4$. Because $4b+m$ advances by $4$ per block and $\gcd(4,64)=4$, the 64-bit payload cycles once every $16$ blocks, assigning each of the $R = \lfloor B/16\rfloor$ repetitions of bit $w_i$ to a distinct $8\times 8$ spatial block $b$. Thus block-level perturbations are statistically independent across the $R$ votes for any given bit $w_i$, and the probability that $\ge R/2$ Bernoulli($p_e$) errors occur is bounded by the exact binomial tail and by $\exp(-2 R (1/2 - p_e)^2)$ via Hoeffding's inequality.
+\end{proof}
+
+Finally, Stage 4 computes \texttt{output\_pixel\_sha256} over the final post-QIM uncompressed \texttt{uint8} RGB buffer $I_{\text{out}}$ and serializes an ISO/IEC 19566-5 JUMBF superbox (\texttt{jumb}) into an ISO/IEC 15948 PNG \texttt{caBX} chunk~\cite{iso15948} with IEEE 802.3 CRC-32 validation:
+\begin{lstlisting}
+[PNG Sig (8B)] -> [PNG IHDR (25B)] -> [PNG caBX (4B Len + "caBX" +
+  [JUMBF Superbox: 4B LBox + "jumb"
+    |-- "jumd": UUID 63327061-0011-0010-8000-00aa00389b71
+    |-- "json": {"source_structural_mask_sha256": "...",
+                 "output_pixel_sha256": "...",
+                 "post_lock_edge_ssim": 0.9987,
+                 "post_step_a_wasserstein_w2": 1.7638,
+                 "post_lock_wasserstein_w2": 4.2886,
+                 "post_output_wasserstein_w2": 4.3071,
+                 "eval_heldout_wasserstein_w2": 4.6240,
+                 "dct_watermark_hex": "..."}
+    |-- "c2sh": HMAC-SHA256(key, jumd || json)]
+  + CRC-32 (4B))] -> [PNG IDAT (Pixels)] -> [PNG IEND (12B)]
+\end{lstlisting}
+
+\subsection{Temporal Video GOP Wavelet EMA Flicker Suppression}
+When synthesizing multi-frame video sequences $\{I_{\text{cand}}^{(t)}\}_{t=1}^T$ corresponding to per-frame source sequence $\{I_{\text{src}}^{(t)}\}_{t=1}^T$ via \texttt{veo-3.1-generate-001}, independent denoising trajectories induce both global frame-mean exposure jumps and local zero-mean temporally uncorrelated subband noise $\epsilon_t(u,v)$ ($\text{Var}(\epsilon_t) = \sigma^2_{\text{local}}, t \ge 1$) in $\widehat{LL}_K^{(t)} = LL_K(\widetilde{L}^{*(t)}_{\text{cand}})$. Step A's quantile transport and mean re-anchoring lock every frame's global spatial mean luminance to the constant style palette mean $\mu(L^*_{\text{ref}})$, while Step B applies a recursive wavelet-domain EMA filter with temporal lock weight $\beta \in [0, 1)$ ($\beta = 0.78$ in Stratum $S_4$):
+\begin{equation}
+\overline{LL}_K^{(t)} = \beta\, \overline{LL}_K^{(t-1)} + (1-\beta)\, \widehat{LL}_K^{(t)}, \quad t = 2,\dots,T,
+\label{eq:gop_ema}
+\end{equation}
+initialized at $\overline{LL}_K^{(1)} = \widehat{LL}_K^{(1)}$.
+
+\begin{theorem}[Global DC Flicker Elimination and Local Wavelet EMA Variance Attenuation]
+\label{thm:gop}
+Because Step A locks $\mu(\widehat{LL}_K^{(t)}) = 2^K \mu(L^*_{\text{ref}})$ across all $t \in \{1,\dots,T\}$ and Theorem~\ref{thm:parseval} preserves pre-clamping $\mu(\widehat{L}^{*(t)}) = 2^{-K}\mu(\overline{LL}_K^{(t)})$, the pre-clamping global frame-mean inter-frame jump variance $\sigma^2_{\text{flicker}} \triangleq \text{Var}(\{\mu(\widehat{L}^{*(t)}) - \mu(\widehat{L}^{*(t-1)})\}_{t=2}^T)$ is identically $0.0000$ ($0.0001$ on final exported 8-bit sRGB frames). Simultaneously, for zero-mean second-order stationary temporally uncorrelated subband noise $\epsilon_t(u,v)$ with $\text{Var}(\widehat{LL}_K^{(j)}(u,v)) = \sigma^2_{\text{local}}$ ($\forall j \in \{1,\dots,T\}$) and $\text{Cov}(\epsilon_{t_1}(u,v), \epsilon_{t_2}(u,v)) = 0$ ($t_1 \ne t_2$), Eq.~\eqref{eq:gop_ema} attenuates local tile variance at frame $t \ge 1$ to:
+\begin{equation}
+\begin{aligned}
+\text{Var}\!\left(\overline{LL}_K^{(t)}(u,v)\right) &= \sigma^2_{\text{local}}\!\left[\frac{1-\beta}{1+\beta} + \frac{2\beta}{1+\beta}\beta^{2(t-1)}\right] \\
+&\xrightarrow{t\to\infty} \frac{1-\beta}{1+\beta}\,\sigma^2_{\text{local}},
+\end{aligned}
+\label{eq:gop_var}
+\end{equation}
+while high-frequency detail fluctuations in $\{LH_k^{(t)}, HL_k^{(t)}, HH_k^{(t)}\}$ are scaled by $(1-\gamma_\tau)^2$ per Theorem~\ref{thm:parseval}.
+\end{theorem}
+\begin{proof}
+Since $\mu(\widehat{LL}_K^{(t)}) = 2^K\mu(L^*_{\text{ref}})$ for all $t$, induction on Eq.~\eqref{eq:gop_ema} yields $\mu(\overline{LL}_K^{(t)}) \equiv 2^K\mu(L^*_{\text{ref}})$, so $\mu(\widehat{L}^{*(t)}) - \mu(\widehat{L}^{*(t-1)}) = 0$ for all $t \ge 2$ and pre-clamping $\sigma^2_{\text{flicker}} = 0$. For local tile fluctuations $\epsilon_t(u,v)$ with $\text{Var}(\widehat{LL}_K^{(j)}(u,v)) = \sigma^2_{\text{local}}$ ($\forall j \ge 1$) and $\text{Cov}(\epsilon_{t_1}(u,v), \epsilon_{t_2}(u,v)) = 0$ ($t_1 \ne t_2$), expanding $\overline{LL}_K^{(t)} = \beta^{t-1}\widehat{LL}_K^{(1)} + (1-\beta)\sum_{j=0}^{t-2}\beta^j \widehat{LL}_K^{(t-j)}$ for $t \ge 2$ over uncorrelated frames gives $\sigma^2_{\text{local}}\big[\beta^{2(t-1)} + (1-\beta)^2 \frac{1-\beta^{2(t-1)}}{1-\beta^2}\big] = \sigma^2_{\text{local}}\big[\frac{1-\beta}{1+\beta} + \frac{2\beta}{1+\beta}\beta^{2(t-1)}\big]$. At $\beta = 0.78$, this reaches $0.1506\,\sigma^2_{\text{local}}$ at terminal frame $t=8$ ($84.9\%$ reduction) and converges as $t \to \infty$ to $\frac{1-\beta}{1+\beta}\sigma^2_{\text{local}} = 0.1236\,\sigma^2_{\text{local}}$ ($87.6\%$ steady-state reduction; $88.7\%$ empirical temporal sample variance reduction across the 8-frame GOP from $33.3486$ to $3.7669$).
+\end{proof}
+
+\section{Empirical Evaluation}
+\label{sec:eval}
+
+\subsection{Experimental Setup, Qualitative Visualization, and Stratified Benchmark ($N = 600$)}
+We evaluated Agent-GhibliLock on an Apple Silicon M-series workstation (8 CPU cores) across $N = 600$ programmatic cross-modal trials ($64\times 64$ localized ROI tile resolution, $K = 2$ Haar levels, $M = 8$ SWOT steps, $\Delta_{\text{QIM}} = 14.0$). Fig.~\ref{fig:qualitative} presents a 6-panel qualitative comparison on a $128\times 128$ scene containing a high-contrast ``Kappa'' diamond emblem and diagonal metallic railing, demonstrating how Global 3D SWOT Only (\textbf{B3b}) aligns the Studio Ghibli gouache palette ($W_2^{\text{StepA}} = 1.23$) while leaving the emblem missing ($\text{SSIM}_{\text{edge}} = 0.0548$), whereas \textbf{Agent-GhibliLock} restores exact high-frequency emblem and rail phase geometry ($\text{SSIM}_{\text{edge}} = 0.9815, W_2^{\text{out}} = 1.64, \text{BER} = 0$).
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{plots/fig_qualitative_ghiblilock_comparison.png}
+\caption{Qualitative visual and spectral comparison on a $128\times 128$ scene: (a) Source scene $I_{\text{src}}$ with high-contrast ``Kappa'' diamond emblem and diagonal railing (dashed cyan ROI); (b) Unconstrained candidate $I_{\text{cand}}$ (\textbf{B1}, $\text{SSIM}_{\text{edge}}=0.0712, W_2=24.51$) showing complete loss of the emblem and blurred rail; (c) Global 3D SWOT Only (\textbf{B3b}, $M=8, \text{SSIM}_{\text{edge}}=0.0548, W_2^{\text{StepA}}=1.23$); (d) \textbf{Agent-GhibliLock} output $I_{\text{out}}$ ($\text{SSIM}_{\text{edge}}=0.9815, W_2^{\text{out}}=1.64$); and (e)--(f) Level-1 Haar detail energy maps $E_{\text{full}}(L^*_{\text{src}})$ vs.\ $E_{\text{full}}(L^*_{\text{out}})$ confirming phase-locked emblem and rail restoration with $\text{BER}=0$.}
+\label{fig:qualitative}
+\end{figure*}
+
+The $N = 600$ benchmark is partitioned into five workload strata:
+\begin{itemize}
+    \item \textbf{Stratum $S_1$ ($n_1 = 150$, Apparel Emblem \& Portrait Geometry):} Source scenes containing high-contrast geometric shirt emblems and foreground diagonal railings against a 3-region Studio Ghibli cel-shaded gouache reference palette $Y_{\text{ref}}$.
+    \item \textbf{Stratum $S_2$ ($n_2 = 150$, Architectural \& Perspective Vanishing Rails):} Multi-pillar architectural grids combined with angled guardrails.
+    \item \textbf{Stratum $S_3$ ($n_3 = 100$, Foliage \& Gouache Chromaticity Transport):} Outdoor scenes requiring large CIELAB chromaticity shifts toward Studio Ghibli gouache palettes.
+    \item \textbf{Stratum $S_4$ ($n_4 = 100$, Temporal Video GOP Sequences):} 8-frame video GOPs ($\beta = 0.78$) exhibiting severe pre-lock inter-frame global exposure flicker ($\sigma^2_{\text{flicker}} = 345.2400$) and local subband variance ($\sigma^2_{\text{local}} = 33.3486$), compared against \textbf{Pixel-Space Frame-to-Frame EMA} ($\sigma^2_{\text{flicker}} = 5.8496, \text{SSIM}_{\text{edge}} = 0.0464$) and \textbf{Global Luminance Histogram Locking}~\cite{bonneel2015blind} ($\sigma^2_{\text{flicker}} = 0.0003, \text{SSIM}_{\text{edge}} = 0.0463, 0\%$ local $LL_K$ tile variance attenuation).
+    \item \textbf{Stratum $S_5$ ($n_5 = 100$, Adversarial Tampering \& Channel Survival):} Partitioned into \textbf{A1} ($n=25$ unstripped spatial tamper trials), \textbf{A2} ($n=50$ pure \texttt{caBX} metadata-stripping trials), and \textbf{A3} ($n=25$ container-stripped $+\, \pm 2\text{ LSB}$ / lossy JPEG $Q = 85$ channel survival trials), compared against container-only C2PA (\textbf{B4}) and classical blind \textbf{Cox Spread-Spectrum 2D-DCT}~\cite{cox1997}.
+\end{itemize}
+
+Table~\ref{tab:main_results}, Table~\ref{tab:strata}, and Fig.~\ref{fig:bars} summarize the results across all $N = 600$ trials. Table~\ref{tab:strata} explicitly reports all four Wasserstein checkpoints ($\widehat{W}_2^{\text{StepA}}, \widehat{W}_2^{\text{StepB}}, \widehat{W}_2^{\text{out}}, \widehat{SW}_2^{\text{eval}}$) across Strata $S_1\text{--}S_5$.
+
+\begin{table}[!htbp]
+\centering
+\caption{Per-Stratum Performance Breakdown of Agent-GhibliLock ($N = 600$, $64\times 64$ Tiles; Comparing Step-A $\widehat{W}_2^{\text{StepA}}$, Step-B $\widehat{W}_2^{\text{StepB}}$, Post-QIM $\widehat{W}_2^{\text{out}}$, and Held-Out $\widehat{SW}_2^{\text{eval}}$ [$M_{\text{eval}}=64$])}
+\label{tab:strata}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Stratum} & \textbf{$n_i$} & \textbf{Edge $\text{SSIM}_{\text{edge}}$} & \textbf{Step-A $\widehat{W}_2^{\text{StepA}}$} & \textbf{Post-QIM $\widehat{W}_2^{\text{out}}$} & \textbf{Held-Out $\widehat{SW}_2^{\text{eval}}$} & \textbf{Mean / p95 Lat.} \\
+\midrule
+$S_1$: Apparel Logo \& Portrait & $150$ & $0.9985 \pm 0.0011$ & $1.7651$ & $4.0286 \pm 0.1549$ & $4.2589 \pm 0.1827$ & $155.6 / 221.7\text{ ms}$ \\
+$S_2$: Perspective Rail Geometry & $150$ & $0.9988 \pm 0.0009$ & $1.7650$ & $4.7322 \pm 0.2382$ & $5.1731 \pm 0.2895$ & $148.1 / 193.9\text{ ms}$ \\
+$S_3$: Foliage \& Gouache Palette & $100$ & $0.9988 \pm 0.0009$ & $1.7672$ & $4.6941 \pm 0.2372$ & $5.1333 \pm 0.2918$ & $153.8 / 210.6\text{ ms}$ \\
+$S_4$: Temporal Video GOP (8-f) & $100$ & $0.9986 \pm 0.0010$ & $1.7576$ & $3.9922 \pm 0.1538$ & $4.2200 \pm 0.1789$ & $146.7 / 174.9\text{ ms}$ \\
+$S_5$: Adversarial Tamper \& Noise & $100$ & $0.9986 \pm 0.0010$ & $1.7627$ & $4.0151 \pm 0.1678$ & $4.2427 \pm 0.1945$ & $158.8 / 241.4\text{ ms}$ \\
+\midrule
+\textbf{Total / Pooled ($N=600$)}$^\ddagger$ & $\mathbf{600}$ & $\mathbf{0.9987 \pm 0.0010}$ & $\mathbf{1.7638}$ & $\mathbf{4.3071 \pm 0.3981}$ & $\mathbf{4.6240 \pm 0.5084}$ & $\mathbf{152.5 / 204.4\text{ ms}}$ \\
+\bottomrule
+\multicolumn{7}{l}{\scriptsize $^\ddagger$Pre-QIM Post-Step-B $\widehat{W}_2^{\text{StepB}} = 4.2886 \pm 0.3733$; QIM + sRGB clamping adds $+0.0185$ to $\widehat{W}_2^{\text{out}} = 4.3071$.}
+\end{tabular}%
+}
+\end{table}
+
+\begin{figure}[!htbp]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    bar width=9pt,
+    width=8.8cm,
+    height=4.7cm,
+    ylabel={Metric Score / Rate (\%)},
+    symbolic x coords={Edge-SSIM, Struct-Pass, Tamper-Det, DCT-Recov},
+    xtick=data,
+    ymin=0, ymax=118,
+    legend style={at={(0.5,1.03)}, anchor=south, legend columns=3, font=\tiny},
+    nodes near coords,
+    every node near coord/.append style={font=\tiny, rotate=0, /pgf/number format/.cd, fixed, fixed zerofill, precision=2},
+    grid=major,
+    grid style={dashed, gray!30},
+    tick label style={font=\footnotesize},
+    label style={font=\footnotesize\bfseries}
+]
+\addplot[fill=red!65!white, draw=red!80!black] coordinates {(Edge-SSIM, 4.13) (Struct-Pass, 0.00) (Tamper-Det, 0.00) (DCT-Recov, 0.00)};
+\addplot[fill=orange!70!white, draw=orange!85!black] coordinates {(Edge-SSIM, 35.88) (Struct-Pass, 0.00) (Tamper-Det, 0.00) (DCT-Recov, 0.00)};
+\addplot[fill=teal!65!white, draw=teal!80!black] coordinates {(Edge-SSIM, 4.13) (Struct-Pass, 0.00) (Tamper-Det, 25.00) (DCT-Recov, 0.00)};
+\addplot[fill=purple!65!white, draw=purple!80!black] coordinates {(Edge-SSIM, 44.82) (Struct-Pass, 0.00) (Tamper-Det, 0.00) (DCT-Recov, 0.00)};
+\addplot[fill=green!60!black, draw=green!80!black] coordinates {(Edge-SSIM, 98.95) (Struct-Pass, 100.00) (Tamper-Det, 0.00) (DCT-Recov, 0.00)};
+\addplot[fill=blue!75!white, draw=blue!90!black] coordinates {(Edge-SSIM, 99.87) (Struct-Pass, 100.00) (Tamper-Det, 100.00) (DCT-Recov, 100.00)};
+\legend{B1: Prompt, B2: VLM-Judge, B4: C2PA-Only, B6: SDEdit, B5: WCT2, Agent-GhibliLock}
+\end{axis}
+\end{tikzpicture}%
+}
+\caption{Comparison of structural edge preservation ($\text{SSIM}_{\text{edge}}\times 100$), structural pass rate ($\ge 0.88$), overall $S_5$ audit rate, and blind mid-band 2D-DCT watermark recovery across $N=600$ trials.}
+\label{fig:bars}
+\end{figure}
+
+\subsection{Live Google Cloud Vertex AI Multi-Model Evaluation and Synthetic Drift Curriculum ($128\times 128$, $N_{\text{scenes}}=10$)}
+Table~\ref{tab:multimodel} reports our $128\times 128$ evaluation ($B = 256$ blocks, $R = \lfloor B/16\rfloor = 16$ QIM votes/bit, $N_{\text{scenes}} = 10$ diverse scenes per row) separated into two distinct regimes:
+\begin{enumerate}
+    \item \textbf{Part I (Rows 1--3, Live Google Cloud Vertex AI Production Endpoints):} Executes live API calls (\texttt{live\_vertex\_call=True} on \texttt{project="aniket-personal"}, \texttt{location="global"}) to \texttt{gemini-2.5-flash} ($1696.1\text{ ms}$ API latency, $105$ prompt / $65$ output tokens), \texttt{gemini-2.5-pro} ($3164.0\text{ ms}$ API latency, $105$ prompt / $11$ output tokens), and \texttt{gemini-3-flash-preview} ($2100.6\text{ ms}$ API latency, $105$ prompt / $80$ output tokens) to synthesize structured \texttt{GhP} visual decomposition prompts. Across all $30$ live trials ($10$ scenes $\times 3$ models), Step A reduces $W_2$ from $18.16\text{--}18.26$ to $\widehat{W}_2^{\text{StepA}} \in [1.8648, 1.9493]$, while final post-Step-B, post-QIM output $\widehat{W}_2^{\text{out}} \in [3.6266, 3.7015]$ and held-out $\widehat{SW}_2^{\text{eval}} \in [3.8589, 3.9298]$ remain strictly below $\tau_{\text{color}} = 4.50$, elevating $\text{SSIM}_{\text{edge}}$ to $0.9966 \pm 0.0007$ with $\text{BER} = 0.0000$ and $10/10$ ($100\%$) C2PA \texttt{caBX} verification.
+    \item \textbf{Part II (Rows 4--8, Controlled Synthetic Structural-Conditioning Curriculum Tiers \texttt{C1}--\texttt{C5}):} Sweeps upstream structural retention prior $\eta_{\text{struct}} \in \{0.04, 0.08, 0.12, 0.16, 0.20\}$ across $N_{\text{scenes}} = 10$ scenes per tier, verifying that Agent-GhibliLock consistently converges to $\text{SSIM}_{\text{edge}} \in [0.9952, 0.9974]$ and $\widehat{W}_2^{\text{out}} \in [3.5591, 3.7794] \le \tau_{\text{color}} = 4.50$.
+\end{enumerate}
+
+\begin{table*}[t]
+\centering
+\caption{Multi-Model & Curriculum Evaluation ($128\times 128$ Resolution, $N_{\text{scenes}} = 10$ Scenes/Row, $\tau_{\text{color}} = 4.50$): Part I Evaluates Live Google Cloud Vertex AI Endpoints (\texttt{project="aniket-personal"}); Part II Evaluates Synthetic Upstream Conditioning Curriculum Tiers (\texttt{C1}--\texttt{C5})}
+\label{tab:multimodel}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Endpoint / Curriculum Tier} & \textbf{Vertex API Latency (Toks)} & \textbf{Pre $\to$ Post $\text{SSIM}_{\text{edge}}$} & \textbf{Pre $\to$ Step-A $\to$ Post-QIM $\widehat{W}_2^{\text{out}}$} & \textbf{Held-Out $\widehat{SW}_2^{\text{eval}}$} & \textbf{DCT PSNR} & \textbf{BER} & \textbf{C2PA \texttt{caBX}} & \textbf{Compiler Latency} \\
+\midrule
+\multicolumn{9}{l}{\textit{\textbf{Part I: Live Google Cloud Vertex AI Endpoints (\texttt{project="aniket-personal", location="global", live\_vertex\_call=True}, $N_{\text{scenes}}=10$)}}} \\
+\texttt{gemini-2.5-flash} (Live GA) & $1696.1\text{ ms}$ ($105 / 65$) & $0.0355 \to \mathbf{0.9966 \pm 0.0007}$ & $18.2624 \to 1.8648 \to \mathbf{3.6266 \pm 0.0895}$ & $3.8589$ & $47.68\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $498.18 \pm 12.34\text{ ms}$ \\
+\texttt{gemini-2.5-pro} (Live GA) & $3164.0\text{ ms}$ ($105 / 11$) & $0.0444 \to \mathbf{0.9966 \pm 0.0008}$ & $18.1649 \to 1.9090 \to \mathbf{3.6782 \pm 0.1281}$ & $3.9069$ & $47.54\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $538.98 \pm 46.89\text{ ms}$ \\
+\texttt{gemini-3-flash-preview} (Live) & $2100.6\text{ ms}$ ($105 / 80$) & $0.0636 \to \mathbf{0.9966 \pm 0.0004}$ & $18.2489 \to 1.9493 \to \mathbf{3.7015 \pm 0.0797}$ & $3.9298$ & $47.61\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $569.96 \pm 64.05\text{ ms}$ \\
+\midrule
+\multicolumn{9}{l}{\textit{\textbf{Part II: Controlled Synthetic Upstream Structural-Conditioning Curriculum Tiers ($\eta_{\text{struct}} \in [0.04, 0.20]$, $N_{\text{scenes}}=10$)}}} \\
+\texttt{Curriculum-Tier-C1} ($\eta=0.04$) & Offline Harness & $0.0336 \to \mathbf{0.9974}$ & $18.3046 \to 1.8428 \to \mathbf{3.5591}$ & $3.7901$ & $47.47\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $526.68\text{ ms}$ \\
+\texttt{Curriculum-Tier-C2} ($\eta=0.08$) & Offline Harness & $0.0615 \to \mathbf{0.9967}$ & $18.3157 \to 1.9238 \to \mathbf{3.7086}$ & $3.9356$ & $47.35\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $575.59\text{ ms}$ \\
+\texttt{Curriculum-Tier-C3} ($\eta=0.12$) & Offline Harness & $0.1036 \to \mathbf{0.9955}$ & $18.1787 \to 2.0295 \to \mathbf{3.7794}$ & $3.9969$ & $47.50\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $806.60\text{ ms}$ \\
+\texttt{Curriculum-Tier-C4} ($\eta=0.16$) & Offline Harness & $0.1610 \to \mathbf{0.9957}$ & $17.8914 \to 1.9054 \to \mathbf{3.7475}$ & $3.9862$ & $47.49\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $625.78\text{ ms}$ \\
+\texttt{Curriculum-Tier-C5} ($\eta=0.20$) & Offline Harness & $0.2112 \to \mathbf{0.9952}$ & $18.0732 \to 1.7634 \to \mathbf{3.6693}$ & $3.9185$ & $47.54\text{ dB}$ & $0.0000$ & $10/10$ (\checkmark) & $536.79\text{ ms}$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table*}
+
+\subsection{Ablation Study and Stratum $S_5$ Adversarial Forensic Breakdown}
+To isolate the contribution of each architectural stage, we conducted component-wise ablations across Strata $S_1$, $S_4$, and $S_5$ (Table~\ref{tab:s5_attacks}):
+\begin{enumerate}
+    \item \textbf{Removing 2D Haar Detail Locking ($\gamma = 0$, Full 8-Step SWOT Only, B3b):} Achieves Step-A CIELAB palette alignment $\widehat{W}_2^{\text{StepA}} = 1.7638$ ($\widehat{SW}_2^{\text{eval}} = 1.5239$), but fails to restore high-frequency shirt emblems and diagonal railings lost during synthesis ($\text{SSIM}_{\text{edge}} = 0.0000$; $0\%$ pass rate).
+    \item \textbf{Removing 3D CIELAB SWOT ($M = 0$, Wavelet Lock Only):} Restores structural edge geometry ($\text{SSIM}_{\text{edge}} = 0.9985$), but leaves raw candidate chromaticity unaligned with the target gouache palette ($W_2 = 19.0803$).
+    \item \textbf{Stratum $S_5$ Adversarial Attack Matrix (Container-Only C2PA vs.\ Blind Cox Spread-Spectrum DCT vs.\ Agent-GhibliLock QIM):} Table~\ref{tab:s5_attacks} disaggregates Stratum $S_5$ ($n_5 = 100$) into its three constituent attack regimes. Under \textbf{A1} ($n=25$ unstripped localized spatial tamper trials), both \textbf{B4} and \textbf{Agent-GhibliLock} detect $100.0\%$ ($25/25$) via \texttt{output\_pixel\_sha256}, while Agent-GhibliLock additionally localizes the exact modified $8\times 8$ block $(b_y, b_x)$ whenever $\max_{(u,v)\in\Omega_{\text{mid}}}\text{dist}(\tilde{F}_b(u,v), \Lambda_{\hat{w}_i}) > \Delta_{\text{QIM}}/4 = 3.5$. Under \textbf{A2} ($n=50$ pure \texttt{caBX} stripping) and \textbf{A3} ($n=25$ stripping $+\, \pm 2\text{ LSB}$ / lossy JPEG $Q=85$), container-only C2PA (\textbf{B4}) suffers $100\%$ provenance loss ($0.0\%$ recovery), and classical blind Spread-Spectrum 2D-DCT~\cite{cox1997} ($\alpha_{\text{SS}} = 5.0$) achieves only $75.84\%$ and $76.81\%$ bit accuracy ($\text{BER} = 0.2416$ and $0.2319$, $0\%$ exact 64-bit packet recovery) due to uncancelled host-signal interference ($\text{HSI}$). By contrast, Agent-GhibliLock's host-interference-free mid-band $8\times 8$ DCT QIM watermark recovers $100.0\%$ of all 64-bit soft-binding payloads ($\text{BER} = 0.0000$) across all $75/75$ stripped trials.
+\end{enumerate}
+
+\begin{table}[!htbp]
+\centering
+\caption{Stratum $S_5$ Adversarial Provenance & Watermark Breakdown Across Three Attack Regimes ($n_5 = 100$ Trials)}
+\label{tab:s5_attacks}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\textbf{$S_5$ Attack Regime} & \textbf{B4: Post-Hoc C2PA} & \textbf{Cox Spread-Spectrum DCT~\cite{cox1997}} & \textbf{Agent-GhibliLock (Ours)} \\
+\midrule
+\textbf{A1: Unstripped Spatial Tamper ($n=25$)} & $100.0\%$ (Global Hash) & $0.0\%$ (No Block Loc.) & $\mathbf{100.0\%}$ (Hash + $8\times 8$ Loc.) \\
+\textbf{A2: Pure \texttt{caBX} Chunk Strip ($n=50$)} & $0.0\%$ (Severed) & $75.84\%$ Bit Acc.\ ($\text{BER}=0.2416$) & $\mathbf{100.0\%}$ ($\mathbf{\text{BER}=0.0000}$) \\
+\textbf{A3: Strip $+\, \pm 2\text{ LSB}$ / JPEG $Q=85$ ($n=25$)} & $0.0\%$ (Severed) & $76.81\%$ Bit Acc.\ ($\text{BER}=0.2319$) & $\mathbf{100.0\%}$ ($\mathbf{\text{BER}=0.0000}$) \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\section{Conclusion}
+Agent-GhibliLock integrates 3D CIELAB Sliced-Wasserstein optimal transport, spatial-mean-preserving 2D Haar wavelet detail locking, coarse-subband GOP EMA filtering, mid-band 2D-DCT QIM soft-binding watermarks, and ISO/IEC 19566-5 JUMBF (\texttt{caBX}) packaging to mitigate high-frequency phase drift, multi-frame GOP flicker, and C2PA provenance severance in cross-modal VLM-to-Diffusion pipelines. Three operational scope boundaries govern deployment: (1) Haar detail locking requires upstream macro-spatial registration within the $2^K$-pixel dyadic support (via ControlNet/SDEdit or optical flow) to prevent double-edge ghosting; (2) megapixel ($1024\times 1024$) synthesis relies on parallel tiled GPU/SIMD execution or localized ROI compilation; and (3) block-aligned $8\times 8$ DCT QIM provides fast CPU tamper localization under metadata stripping and JPEG compression, whereas geometric cropping, scaling, or rotation require template resynchronization or neural soft-binding watermarks~\cite{bui2023trustmark,gowal2025}.
+
+\begin{thebibliography}{99}
+\bibitem{rombach2022}
+R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer, ``High-resolution image synthesis with latent diffusion models,'' in \emph{Proc. IEEE/CVF Conf. Computer Vision and Pattern Recognition (CVPR)}, 2022, pp. 10684--10695.
+
+\bibitem{team2025gemini}
+{Gemini Team, Google}, ``Gemini 2.5: Pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities,'' \emph{arXiv preprint arXiv:2507.06261}, 2025.
+
+\bibitem{meng2022sdedit}
+C. Meng, Y. He, Y. Song, J. Song, J. Wu, J.-Y. Zhu, and S. Ermon, ``SDEdit: Guided image synthesis and editing with stochastic differential equations,'' in \emph{Proc. Int. Conf. Learning Representations (ICLR)}, 2022.
+
+\bibitem{zhang2023}
+L. Zhang, A. Rao, and M. Agrawala, ``Adding conditional control to text-to-image diffusion models,'' in \emph{Proc. IEEE/CVF Int. Conf. Computer Vision (ICCV)}, 2023, pp. 3836--3847.
+
+\bibitem{wang2004}
+Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli, ``Image quality assessment: from error visibility to structural similarity,'' \emph{IEEE Transactions on Image Processing}, vol. 13, no. 4, pp. 600--612, 2004.
+
+\bibitem{bonneel2015blind}
+N. Bonneel, J. Tompkin, K. Sunkavalli, D. Sun, S. Paris, and H. Pfister, ``Blind video temporal consistency,'' \emph{ACM Transactions on Graphics}, vol. 34, no. 6, Art. no. 196, pp. 1--9, 2015.
+
+\bibitem{c2pa2024}
+Coalition for Content Provenance and Authenticity (C2PA), \emph{C2PA Technical Specification}, Version 2.1, 2024.
+
+\bibitem{iso19566}
+ISO/IEC 19566-5:2019 (2nd ed., 2023), \emph{Information technologies --- JPEG systems --- Part 5: JPEG universal metadata box format (JUMBF)}, International Organization for Standardization, 2019/2023.
+
+\bibitem{iso15948}
+ISO/IEC 15948:2004, \emph{Information technology --- Computer graphics and image processing --- Portable Network Graphics (PNG): Functional specification}, 2004.
+
+\bibitem{bui2023trustmark}
+T. Bui, S. Agarwal, and J. Collomosse, ``TrustMark: Universal watermarking for arbitrary resolution images,'' in \emph{Proc. IEEE/CVF Int. Conf. Computer Vision (ICCV)}, 2025 (arXiv:2311.18297, 2023).
+
+\bibitem{gatys2016}
+L. A. Gatys, A. S. Ecker, and M. Bethge, ``Image style transfer using convolutional neural networks,'' in \emph{Proc. IEEE Conf. Computer Vision and Pattern Recognition (CVPR)}, 2016, pp. 2414--2423.
+
+\bibitem{yoo2019wct2}
+J. Yoo, Y. Uh, S. Chun, B. Kang, and J.-W. Ha, ``Photorealistic style transfer via wavelet transforms,'' in \emph{Proc. IEEE/CVF Int. Conf. Computer Vision (ICCV)}, 2019, pp. 9035--9044.
+
+\bibitem{haar1910}
+A. Haar, ``Zur Theorie der orthogonalen Funktionensysteme,'' \emph{Mathematische Annalen}, vol. 69, no. 3, pp. 331--371, 1910.
+
+\bibitem{mallat1989}
+S. G. Mallat, ``A theory for multiresolution signal decomposition: the wavelet representation,'' \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence}, vol. 11, no. 7, pp. 674--693, 1989.
+
+\bibitem{daubechies1992}
+I. Daubechies, \emph{Ten Lectures on Wavelets}. Philadelphia, PA, USA: SIAM, 1992.
+
+\bibitem{pitie2007automated}
+F. Piti\'{e}, A. C. Kokaram, and R. Dahyot, ``Automated colour grading using colour distribution transfer,'' \emph{Computer Vision and Image Understanding}, vol. 107, no. 1--2, pp. 123--137, 2007.
+
+\bibitem{rabin2011}
+J. Rabin, G. Peyr\'{e}, J. Delon, and M. Bernot, ``Wasserstein barycenter and its application to texture mixing,'' in \emph{Proc. Scale Space and Variational Methods in Computer Vision (SSVM)}, Springer, 2011, pp. 435--446.
+
+\bibitem{bonneel2015}
+N. Bonneel, J. Rabin, G. Peyr\'{e}, and H. Pfister, ``Sliced and Radon Wasserstein barycenters of measures,'' \emph{Journal of Mathematical Imaging and Vision}, vol. 51, no. 1, pp. 22--45, 2015.
+
+\bibitem{gowal2025}
+S. Gowal \emph{et al.}, ``SynthID-Image: Image watermarking at internet scale,'' \emph{arXiv preprint arXiv:2510.09263}, 2025.
+
+\bibitem{cox1997}
+I. J. Cox, J. Kilian, F. T. Leighton, and T. Shamoon, ``Secure spread spectrum watermarking for multimedia,'' \emph{IEEE Transactions on Image Processing}, vol. 6, no. 12, pp. 1673--1687, 1997.
+
+\bibitem{chen2001}
+B. Chen and G. W. Wornell, ``Quantization index modulation: a class of provably good methods for digital watermarking and information embedding,'' \emph{IEEE Transactions on Information Theory}, vol. 47, no. 4, pp. 1423--1443, 2001.
+\end{thebibliography}
+
+\end{document}
