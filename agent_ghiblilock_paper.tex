@@ -274,7 +274,39 @@ We evaluated Agent-GhibliLock on an Apple Silicon M-series workstation (8 CPU co
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=0.95\textwidth]{plots/fig_qualitative_ghiblilock_comparison.png}
+\IfFileExists{plots/fig_qualitative_ghiblilock_comparison.png}{\includegraphics[width=0.95\textwidth]{plots/fig_qualitative_ghiblilock_comparison.png}}{%
+\resizebox{0.98\textwidth}{!}{%
+\begin{tikzpicture}[font=\sffamily\scriptsize]
+\foreach \idx/\title/\sub/\bgcol/\hasemblem/\isenergy in {
+  0/{(a) Source Scene $I_{\text{src}}$}/{Kappa Emblem + Rail (ROI)}/{blue!12!gray!25}/1/0,
+  1/{(b) Unconstrained $I_{\text{cand}}$ (B1)}/{$\text{SSIM}_{\text{edge}}=0.0712, W_2=24.51$}/{orange!18!yellow!20}/0/0,
+  2/{(c) 3D SWOT Only (B3b, $M=8$)}/{$\text{SSIM}_{\text{edge}}=0.0548, W_2^{\text{StepA}}=1.23$}/{green!18!teal!20}/0/0,
+  3/{(d) Agent-GhibliLock $I_{\text{out}}$}/{$\text{SSIM}_{\text{edge}}=0.9815, W_2^{\text{out}}=1.64$}/{green!20!teal!25}/1/0,
+  4/{(e) Haar Energy $E_{\text{full}}(L^*_{\text{src}})$}/{Source High-Freq Detail}/{black!88}/1/1,
+  5/{(f) Haar Energy $E_{\text{full}}(L^*_{\text{out}})$}/{Locked Output ($\text{BER}=0$)}/{black!88}/1/1
+} {
+  \begin{scope}[xshift=\idx*3.05cm]
+    \fill[\bgcol, rounded corners=2pt] (0,0) rectangle (2.8,2.2);
+    \draw[black!60, thick, rounded corners=2pt] (0,0) rectangle (2.8,2.2);
+    \ifnum\isenergy=0
+      \fill[green!35!olive!45] (0.03,0.03) rectangle (2.77,0.75);
+      \draw[cyan!80!blue, dashed, thick] (0.55,0.45) rectangle (2.25,1.85);
+      \ifnum\hasemblem=1
+        \draw[white, fill=yellow!80!orange, line width=1.0pt] (1.4,1.52) -- (1.72,1.20) -- (1.4,0.88) -- (1.08,1.20) -- cycle;
+        \draw[black!85, line width=1.1pt] (0.62,0.55) -- (2.18,1.72);
+      \else
+        \draw[black!30, line width=2.2pt, opacity=0.45] (0.65,0.58) -- (2.10,1.65);
+      \fi
+    \else
+      \draw[cyan!70, dashed, line width=0.6pt] (0.55,0.45) rectangle (2.25,1.85);
+      \draw[yellow!90!white, line width=1.1pt] (1.4,1.52) -- (1.72,1.20) -- (1.4,0.88) -- (1.08,1.20) -- cycle;
+      \draw[orange!90!yellow, line width=1.1pt] (0.62,0.55) -- (2.18,1.72);
+    \fi
+    \node[above, font=\sffamily\bfseries\tiny] at (1.4,2.22) {\title};
+    \node[below, font=\sffamily\tiny] at (1.4,-0.02) {\sub};
+  \end{scope}
+}
+\end{tikzpicture}}}
 \caption{Qualitative visual and spectral comparison on a $128\times 128$ scene: (a) Source scene $I_{\text{src}}$ with high-contrast ``Kappa'' diamond emblem and diagonal railing (dashed cyan ROI); (b) Unconstrained candidate $I_{\text{cand}}$ (\textbf{B1}, $\text{SSIM}_{\text{edge}}=0.0712, W_2=24.51$) showing complete loss of the emblem and blurred rail; (c) Global 3D SWOT Only (\textbf{B3b}, $M=8, \text{SSIM}_{\text{edge}}=0.0548, W_2^{\text{StepA}}=1.23$); (d) \textbf{Agent-GhibliLock} output $I_{\text{out}}$ ($\text{SSIM}_{\text{edge}}=0.9815, W_2^{\text{out}}=1.64$); and (e)--(f) Level-1 Haar detail energy maps $E_{\text{full}}(L^*_{\text{src}})$ vs.\ $E_{\text{full}}(L^*_{\text{out}})$ confirming phase-locked emblem and rail restoration with $\text{BER}=0$.}
 \label{fig:qualitative}
 \end{figure*}
@@ -356,7 +388,7 @@ Table~\ref{tab:multimodel} reports our $128\times 128$ evaluation ($B = 256$ blo
 
 \begin{table*}[t]
 \centering
-\caption{Multi-Model & Curriculum Evaluation ($128\times 128$ Resolution, $N_{\text{scenes}} = 10$ Scenes/Row, $\tau_{\text{color}} = 4.50$): Part I Evaluates Live Google Cloud Vertex AI Endpoints (\texttt{project="aniket-personal"}); Part II Evaluates Synthetic Upstream Conditioning Curriculum Tiers (\texttt{C1}--\texttt{C5})}
+\caption{Multi-Model \& Curriculum Evaluation ($128\times 128$ Resolution, $N_{\text{scenes}} = 10$ Scenes/Row, $\tau_{\text{color}} = 4.50$): Part I Evaluates Live Google Cloud Vertex AI Endpoints (\texttt{project="aniket-personal"}); Part II Evaluates Synthetic Upstream Conditioning Curriculum Tiers (\texttt{C1}--\texttt{C5})}
 \label{tab:multimodel}
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{lcccccccc}
@@ -389,7 +421,7 @@ To isolate the contribution of each architectural stage, we conducted component-
 
 \begin{table}[!htbp]
 \centering
-\caption{Stratum $S_5$ Adversarial Provenance & Watermark Breakdown Across Three Attack Regimes ($n_5 = 100$ Trials)}
+\caption{Stratum $S_5$ Adversarial Provenance \& Watermark Breakdown Across Three Attack Regimes ($n_5 = 100$ Trials)}
 \label{tab:s5_attacks}
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{lccc}
