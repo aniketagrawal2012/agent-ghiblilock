@@ -3,14 +3,22 @@ Comprehensive Unit & Adversarial Test Suite for Agent-GhibliLock:
 1. sRGB <-> CIELAB (D65) Bijective Round-Trip Accuracy
 2. Orthonormal 2D Multi-Level Haar Wavelet Transform Exact Invertibility (Even & Odd Shapes)
 3. High-Frequency Structural Edge Mask & Logo/Rail Preservation under Captioning Drift
-4. 1D Sliced-Wasserstein Optimal Transport Distance Axioms & Monotonic Convergence
+4. 3D Sliced-Wasserstein Optimal Transport Distance Axioms, RMS Estimators, & Perturbation Bound
 5. Mid-Band 2D-DCT QIM Cryptographic Watermark Embedding, PSNR (>38 dB), & Blind Extraction
 6. ISO/IEC 19566-5 JUMBF (`caBX`) PNG Binary Container Compilation, CRC-32 Verification,
    and Adversarial Tamper Rejection (Pixel Modification, Manifest Forgery, CRC Corruption)
+7. Spatially Masked ROI vs. Global Wavelet Locking & Exact Spatial Mean Conservation
+8. Decoupled (gamma_tau, alpha_tau) Closed-Loop Controller under Color Violations
+9. QIM Export Self-Noise Decomposition, Blind Majority-Voted Coset Tamper Localization,
+   R=5 Odd Repetition Voting, and Disaggregated LSB vs. Lossy JPEG Q=85 Survival
+10. Motion-Compensated and Motion-Gated Video GOP Wavelet EMA Deflickering
+11. Real Natural Photographic Image Evaluation (Grace Hopper Portrait & Product Pack)
 """
 
 from __future__ import annotations
 
+import io
+import os
 import struct
 import unittest
 import zlib
@@ -18,7 +26,9 @@ import numpy as np
 
 from ghiblilock_engine import (
     AgentGhibliLockCompiler,
+    WaveletDecomposition2D,
     bits_to_bytes,
+    build_spatial_roi_detail_mask,
     bytes_to_bits,
     compute_full_luminance_ssim,
     compute_heldout_sliced_wasserstein_lab,
@@ -38,6 +48,7 @@ from ghiblilock_engine import (
     idwt2_multilevel,
     lab_to_srgb,
     localize_dct_qim_tamper_blocks,
+    measure_qim_export_self_noise,
     srgb_to_lab,
     transport_chromaticity_wasserstein,
     verify_png_c2pa_and_dct_provenance,
@@ -368,6 +379,11 @@ class TestAgentGhibliLock(unittest.TestCase):
             tampered, bits, qim_step=14.0, jpeg_resilient_mode=False
         )
         self.assertIn((2, 3), flagged)
+        # Verify blind majority-voted localization without source registry (expected_bits=None)
+        flagged_blind = localize_dct_qim_tamper_blocks(
+            tampered, expected_bits=None, qim_step=14.0, jpeg_resilient_mode=False
+        )
+        self.assertIn((2, 3), flagged_blind)
 
     def test_15_qim_outperforms_blind_cox_spread_spectrum_dct(self) -> None:
         src = _create_synthetic_scene_with_logo_and_rail(64, 64)
@@ -409,8 +425,170 @@ class TestAgentGhibliLock(unittest.TestCase):
             baselines["Global_Lum_Hist_Lock"]["mean_post_edge_ssim"] + 0.50,
         )
 
+    def test_17_spatially_masked_roi_vs_global_wavelet_locking_and_exact_mean(self) -> None:
+        src = _create_synthetic_scene_with_logo_and_rail(128, 128)
+        cand = _create_unconstrained_diffusion_candidate(src)
+        style = _create_ghibli_style_palette_reference(128, 128)
+        # Add photographic sensor grain in non-ROI sky background of src
+        rng = np.random.default_rng(777)
+        src_noisy_bg = src.copy()
+        src_noisy_bg[:45, :, :] = np.clip(
+            src_noisy_bg[:45, :, :].astype(np.int32) + rng.integers(-12, 13, size=(45, 128, 3)),
+            0,
+            255,
+        ).astype(np.uint8)
+
+        compiler = AgentGhibliLockCompiler(tau_struct=0.88, tau_color=4.5)
+        fg_roi = build_spatial_roi_detail_mask(srgb_to_lab(src)[..., 0], background_floor=0.0)
+        res_global = compiler.compile(src_noisy_bg, cand, style, roi_spatial_masking=False)
+        res_roi = compiler.compile(src_noisy_bg, cand, style, roi_spatial_masking=True, roi_mask=fg_roi)
+
+        self.assertGreaterEqual(res_roi.post_lock_edge_ssim, 0.88)
+        self.assertTrue(res_roi.roi_spatial_masking)
+        # In the flat background sky region (y < 32, x >= 72, outside the sun glow disc),
+        # ROI masking suppresses high-frequency photographic sensor grain while preserving gouache sky
+        dwt_global_sky = dwt2_multilevel(srgb_to_lab(res_global.stylized_rgb)[:32, 72:, 0], levels=1)
+        dwt_roi_sky = dwt2_multilevel(srgb_to_lab(res_roi.stylized_rgb)[:32, 72:, 0], levels=1)
+        hf_global = float(np.sqrt(np.mean(dwt_global_sky.details[0][0] ** 2 + dwt_global_sky.details[0][1] ** 2)))
+        hf_roi = float(np.sqrt(np.mean(dwt_roi_sky.details[0][0] ** 2 + dwt_roi_sky.details[0][1] ** 2)))
+        self.assertLess(hf_roi, hf_global * 0.45)
+
+        # Verify algebraic Theorem 1 property: arbitrary spatial mask M_k(u,v) in [0,1]
+        # preserves exact pre-clamping spatial mean luminance mu(L_hat*) == mu(L_tilde*)
+        s_lum = srgb_to_lab(src_noisy_bg)[..., 0]
+        c_lum = srgb_to_lab(cand)[..., 0]
+        d_s = dwt2_multilevel(s_lum, levels=2)
+        d_c = dwt2_multilevel(c_lum, levels=2)
+        rand_masks = [rng.uniform(0.0, 1.0, size=s_lh.shape) for (s_lh, _, _) in d_s.details]
+        fused_det = [
+            (m * s_lh + (1.0 - m) * c_lh, m * s_hl + (1.0 - m) * c_hl, m * s_hh + (1.0 - m) * c_hh)
+            for m, (s_lh, s_hl, s_hh), (c_lh, c_hl, c_hh) in zip(rand_masks, d_s.details, d_c.details)
+        ]
+        rec_lum = idwt2_multilevel(WaveletDecomposition2D(ll=d_c.ll, details=fused_det, original_shape=s_lum.shape))
+        self.assertAlmostEqual(float(np.mean(rec_lum)), float(np.mean(c_lum)), places=10)
+
+    def test_18_training_vs_heldout_wasserstein_rms_and_perturbation_bound(self) -> None:
+        src = _create_synthetic_scene_with_logo_and_rail(64, 64)
+        cand = _create_unconstrained_diffusion_candidate(src)
+        style = _create_ghibli_style_palette_reference(64, 64)
+        src_lab = srgb_to_lab(src)
+        cand_lab = srgb_to_lab(cand)
+        style_lab = srgb_to_lab(style)
+
+        tilde_lab = transport_chromaticity_wasserstein(cand_lab, style_lab, blend_alpha=0.95, swot_steps=8)
+        w2_step_a = compute_sliced_wasserstein_lab(tilde_lab, style_lab, swot_steps=8)
+        sw2_eval = compute_heldout_sliced_wasserstein_lab(tilde_lab, style_lab, num_projections=64, seed=999)
+        # In-sample optimized W_hat_2^StepA is smaller than or comparable to held-out SW_hat_2^eval
+        self.assertLessEqual(w2_step_a, sw2_eval + 0.15)
+
+        # Verify isotropic perturbation bound: |W_hat_2(I_hat, Y_ref) - W_hat_2(I_tilde, Y_ref)| <= ||L_hat* - L_tilde*||_F / sqrt(3 HW)
+        hat_lab = tilde_lab.copy()
+        hat_lab[..., 0] = 0.85 * src_lab[..., 0] + 0.15 * tilde_lab[..., 0]
+        w2_step_b = compute_sliced_wasserstein_lab(hat_lab, style_lab, swot_steps=8)
+        fro_diff = float(np.linalg.norm(hat_lab[..., 0] - tilde_lab[..., 0], ord="fro"))
+        hw = hat_lab.shape[0] * hat_lab.shape[1]
+        iso_bound = fro_diff / np.sqrt(3.0 * hw)
+        self.assertLessEqual(abs(w2_step_b - w2_step_a), iso_bound + 1e-9)
+
+    def test_19_decoupled_alpha_gamma_closed_loop_controller(self) -> None:
+        # Construct a high-contrast source scene where SSIM_edge >= 0.88 is met immediately
+        # but high luminance contrast challenges W_2 <= tau_color
+        src = _create_synthetic_scene_with_logo_and_rail(64, 64)
+        src[:20, :] = [250, 250, 250]
+        src[45:, :] = [15, 15, 20]
+        cand = _create_unconstrained_diffusion_candidate(src)
+        style = _create_ghibli_style_palette_reference(64, 64)
+
+        compiler = AgentGhibliLockCompiler(tau_struct=0.88, tau_color=3.5)
+        res = compiler.compile(src, cand, style)
+        self.assertGreaterEqual(res.post_lock_edge_ssim, 0.88)
+        self.assertLessEqual(res.post_lock_wasserstein_w2, 3.85)
+
+    def test_20_qim_export_self_noise_and_jpeg85_vs_lsb_disaggregation(self) -> None:
+        from PIL import Image
+
+        src = _create_synthetic_scene_with_logo_and_rail(64, 64)
+        bits = bytes_to_bits(b"GHIBLI26")
+
+        # 1. Measure export self-noise eta_b^export from uint8 rounding and gamut clamping
+        self_noise = measure_qim_export_self_noise(src, bits, qim_step=14.0)
+        self.assertLess(self_noise["rms_export_noise"], 0.60)
+        self.assertLess(self_noise["max_export_noise"], 3.5)
+        self.assertEqual(self_noise["single_coeff_error_rate_export"], 0.0)
+
+        # 2. Test R=5 odd repetition voting (5 mid-band coords on 64x64 -> 64*5/64 = 5 votes/bit, gcd(5,64)=1)
+        secret = b"enterprise-dither-key-2026"
+        wm_r5 = embed_midband_dct_watermark(src, bits, qim_step=14.0, num_midband_coords=5, secret_key=secret)
+        ext_r5, conf_r5, hz, ho = extract_midband_dct_watermark(
+            wm_r5, payload_len=64, qim_step=14.0, num_midband_coords=5, secret_key=secret, return_hard_vote_stats=True
+        )
+        self.assertEqual(ext_r5, bits)
+        self.assertTrue(np.all(hz + ho == 5), "Each of the 64 bits must receive exactly R=5 odd votes")
+
+        # 3. Test lossy JPEG Q=85 recompression survival on R=5 watermarked image
+        buf = io.BytesIO()
+        Image.fromarray(wm_r5).save(buf, format="JPEG", quality=85, subsampling=0)
+        buf.seek(0)
+        jpg_rgb = np.asarray(Image.open(buf).convert("RGB"))
+        ext_jpg, _ = extract_midband_dct_watermark(
+            jpg_rgb, payload_len=64, qim_step=14.0, num_midband_coords=5, secret_key=secret
+        )
+        self.assertEqual(ext_jpg, bits)
+
+    def test_21_motion_compensated_and_gated_video_gop_wavelet_ema(self) -> None:
+        base_src = _create_synthetic_scene_with_logo_and_rail(64, 64)
+        base_cand = _create_unconstrained_diffusion_candidate(base_src)
+        style = _create_ghibli_style_palette_reference(64, 64)
+        flicker_offsets = [-20, 24, -18, 22, -21, 19, -20, 23]
+
+        src_frames = []
+        cand_frames = []
+        for t, off in enumerate(flicker_offsets):
+            s_f = np.roll(base_src, shift=t * 4, axis=1)
+            # Inject a fast-moving local high-contrast foreground object on frames 3..5
+            if 3 <= t <= 5:
+                s_f[20:32, 20:32] = 252
+            src_frames.append(s_f)
+            c_f = np.clip(np.roll(base_cand, shift=t * 4, axis=1).astype(np.int32) + off, 0, 255).astype(np.uint8)
+            cand_frames.append(c_f)
+
+        compiler = AgentGhibliLockCompiler()
+        gop_mc = compiler.compile_video_gop(
+            src_frames, cand_frames, style, temporal_ema_beta=0.78, motion_compensated=True
+        )
+        self.assertLess(gop_mc["post_preclamp_flicker_variance"], 1e-12)
+        self.assertGreaterEqual(gop_mc["mean_post_edge_ssim"], 0.88)
+
+    def test_22_real_natural_photograph_compilation_grace_hopper(self) -> None:
+        import matplotlib
+        from PIL import Image
+
+        sample_dir = os.path.join(os.path.dirname(matplotlib.__file__), "mpl-data", "sample_data")
+        gh_path = os.path.join(sample_dir, "grace_hopper.jpg")
+        self.assertTrue(os.path.exists(gh_path))
+
+        img = Image.open(gh_path).convert("RGB").resize((128, 128), Image.Resampling.BICUBIC)
+        src_photo = np.asarray(img, dtype=np.uint8)
+        # Simulate stylistic VLM-to-Diffusion candidate (smooth gouache shading + softened collar insignia)
+        padded = np.pad(src_photo.astype(np.float64), ((2, 2), (2, 2), (0, 0)), mode="edge")
+        blurred = (
+            padded[:-4, :-4] + padded[:-4, 2:-2] + padded[:-4, 4:]
+            + padded[2:-2, :-4] + padded[2:-2, 2:-2] + padded[2:-2, 4:]
+            + padded[4:, :-4] + padded[4:, 2:-2] + padded[4:, 4:]
+        ) / 9.0
+        style_ref = _create_ghibli_style_palette_reference(128, 128)
+        cand_photo = np.clip(0.70 * blurred + 0.30 * style_ref.astype(np.float64), 0, 255).astype(np.uint8)
+
+        compiler = AgentGhibliLockCompiler(tau_struct=0.88, tau_color=4.5)
+        res_global = compiler.compile(src_photo, cand_photo, style_ref, roi_spatial_masking=False)
+        res_roi = compiler.compile(src_photo, cand_photo, style_ref, roi_spatial_masking=True)
+
+        self.assertGreaterEqual(res_global.post_lock_edge_ssim, 0.90)
+        self.assertGreaterEqual(res_roi.post_lock_edge_ssim, 0.88)
+        self.assertLessEqual(res_global.post_output_wasserstein_w2, 4.5)
+        self.assertEqual(res_global.dct_watermark_ber, 0.0)
+        self.assertEqual(res_roi.dct_watermark_ber, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
-
