@@ -30,6 +30,7 @@ from ghiblilock_engine import (
     bits_to_bytes,
     build_spatial_roi_detail_mask,
     bytes_to_bits,
+    compute_dct8_ac_l1_rounding_bounds,
     compute_full_luminance_ssim,
     compute_heldout_sliced_wasserstein_lab,
     compute_parseval_wavelet_energies,
@@ -589,6 +590,76 @@ class TestAgentGhibliLock(unittest.TestCase):
         self.assertEqual(res_global.dct_watermark_ber, 0.0)
         self.assertEqual(res_roi.dct_watermark_ber, 0.0)
 
+    def test_23_ac_l1_rounding_bounds_and_row_shifted_hard_soft_qim_voting(self) -> None:
+        # 1. Verify exact analytical AC l1/linf Holder rounding bounds (< 3.5 = Delta_QIM / 4)
+        bounds = compute_dct8_ac_l1_rounding_bounds()
+        self.assertAlmostEqual(bounds["m4_max_ac_rounding_bound"], 3.3486, places=3)
+        self.assertAlmostEqual(bounds["m5_max_ac_rounding_bound"], 2.0 + np.sqrt(2.0), places=6)
+        self.assertLess(bounds["m4_max_ac_rounding_bound"], 3.5)
+        self.assertLess(bounds["m5_max_ac_rounding_bound"], 3.5)
+        self.assertAlmostEqual(bounds["haar_3ac_subband_linf_bound"], 1.5 * np.sqrt(3.0), places=6)
+
+        # 2. Verify row-shifted interleaving and hard vs. clipped-soft voting under extreme single-block tamper
+        src = _create_synthetic_scene_with_logo_and_rail(128, 128)
+        bits = bytes_to_bits(b"GHIBLI26")
+        wm_rs = embed_midband_dct_watermark(
+            src, bits, qim_step=14.0, num_midband_coords=4, row_shift_interleave=True
+        )
+        # Inject an extreme amplitude tamper (+200 LSB) in a 2x1 vertical strip of 8x8 blocks (by=2..3, bx=3)
+        tampered = wm_rs.copy()
+        tampered[16:32, 24:32] = 255
+        ext_hard, _ = extract_midband_dct_watermark(
+            tampered, payload_len=64, qim_step=14.0, voting_mode="hard", row_shift_interleave=True
+        )
+        ext_soft, _ = extract_midband_dct_watermark(
+            tampered, payload_len=64, qim_step=14.0, voting_mode="clipped_soft", row_shift_interleave=True
+        )
+        self.assertEqual(ext_hard, bits)
+        self.assertEqual(ext_soft, bits)
+
+        flagged = localize_dct_qim_tamper_blocks(
+            tampered, expected_bits=None, qim_step=14.0, voting_mode="hard", row_shift_interleave=True
+        )
+        self.assertIn((2, 3), flagged)
+        self.assertIn((3, 3), flagged)
+
+        # 3. Single-block blind QIM baseline (R=1, num_midband_coords=1) works cleanly without noise
+        wm_r1 = embed_midband_dct_watermark(src, bits, qim_step=14.0, num_midband_coords=1)
+        ext_r1, _ = extract_midband_dct_watermark(wm_r1, payload_len=64, qim_step=14.0, num_midband_coords=1)
+        self.assertEqual(ext_r1, bits)
+
+    def test_24_motion_compensated_pixel_ema_and_ungated_wavelet_ema_baselines(self) -> None:
+        base_src = _create_synthetic_scene_with_logo_and_rail(64, 64)
+        base_cand = _create_unconstrained_diffusion_candidate(base_src)
+        style = _create_ghibli_style_palette_reference(64, 64)
+        flicker_offsets = [-24, 28, -22, 26, -25, 24, -23, 27]
+        src_frames = []
+        cand_frames = []
+        for t, off in enumerate(flicker_offsets):
+            s_f = np.roll(base_src, shift=t * 2, axis=1)
+            c_f = np.clip(np.roll(base_cand, shift=t * 2, axis=1).astype(np.int32) + off, 0, 255).astype(np.uint8)
+            if 3 <= t <= 5:
+                s_f[16:32, 16:32] = 250
+                c_f[16:32, 16:32] = 250
+            src_frames.append(s_f)
+            cand_frames.append(c_f)
+
+        compiler = AgentGhibliLockCompiler()
+        gop_gated = compiler.compile_video_gop(
+            src_frames, cand_frames, style, temporal_ema_beta=0.78, motion_compensated=True, motion_gate_sigma=35.0
+        )
+        baselines = deflicker_video_gop_baselines(src_frames, cand_frames, style, temporal_ema_beta=0.78)
+        self.assertIn("Motion_Comp_Pixel_EMA", baselines)
+        self.assertIn("Ungated_Motion_Wavelet_EMA", baselines)
+        # Motion-Compensated Pixel EMA lacks wavelet detail lock (SSIM_edge < 0.25 vs >= 0.95 for GhibliLock)
+        self.assertGreater(
+            gop_gated["mean_post_edge_ssim"],
+            baselines["Motion_Comp_Pixel_EMA"]["mean_post_edge_ssim"] + 0.50,
+        )
+        # Both gated and ungated wavelet EMA eliminate global pre-clamp luminance flicker
+        self.assertLess(gop_gated["post_preclamp_flicker_variance"], 1e-12)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

@@ -610,18 +610,47 @@ def _derive_qim_dither_matrix(
     return rng.uniform(0.0, qim_step, size=(max(1, num_blocks), num_coords))
 
 
+def compute_dct8_ac_l1_rounding_bounds() -> Dict[str, float]:
+    """
+    Compute exact worst-case l1/linf Holder rounding bounds 0.5 * ||c_u||_1 * ||c_v||_1
+    for the orthonormal 8x8 Type-II DCT basis vectors on M_4 and M_5 mid-band AC modes,
+    proving deterministically that interior equal-(R,G,B) uint8 rounding (|eps_Y| <= 0.5 LSB)
+    satisfies max_{(u,v) in M_4} |eta_b^export(u,v)| <= 3.3486 < 3.5 = Delta_QIM / 4
+    and max_{(u,v) in M_5} |eta_b^export(u,v)| <= 2 + sqrt(2) = 3.4142 < 3.5.
+    Also returns the 3-AC-subband orthonormal 2D Haar synthesis l1 bound 3*sqrt(3)/2 = 2.5981.
+    """
+    l1_norms = np.sum(np.abs(_DCT8_M), axis=1)
+    m4_bound = max(0.5 * float(l1_norms[u] * l1_norms[v]) for (u, v) in _MIDBAND_COORDS)
+    m5_bound = max(0.5 * float(l1_norms[u] * l1_norms[v]) for (u, v) in _MIDBAND_COORDS_5)
+    dc_bound = 0.5 * float(l1_norms[0] * l1_norms[0])
+    haar_3ac_bound = 1.5 * math.sqrt(3.0)
+    return {
+        "c1_l1_norm": float(l1_norms[1]),
+        "c2_l1_norm": float(l1_norms[2]),
+        "c3_l1_norm": float(l1_norms[3]),
+        "m4_max_ac_rounding_bound": m4_bound,
+        "m5_max_ac_rounding_bound": m5_bound,
+        "dc_rounding_bound": dc_bound,
+        "haar_3ac_subband_linf_bound": haar_3ac_bound,
+    }
+
+
 def embed_midband_dct_watermark(
     srgb_img: np.ndarray,
     payload_bits: List[int],
     qim_step: float = 14.0,
     num_midband_coords: int = 4,
     secret_key: Optional[bytes] = None,
+    row_shift_interleave: bool = False,
 ) -> np.ndarray:
     """
     Embed a binary provenance watermark into the floating-point ITU-R BT.601 luminance
     channel Y = 0.299R + 0.587G + 0.114B in [0, 255] of an sRGB image using Quantization
     Index Modulation (QIM) at mid-band 8x8 2D-DCT coefficients with block-interleaved
-    bit indexing i = (M_coord * b + m) mod payload_len.
+    bit indexing i = (M_coord * b + m) mod payload_len (or row-shifted
+    i = (M_coord * b + 4 * by + m) mod payload_len when `row_shift_interleave=True`).
+    When `num_midband_coords == 1`, embeds 1 mode per block across the first `payload_len`
+    blocks (Single-Block Blind QIM baseline R = 1 without multi-block repetition).
     """
     img = np.array(srgb_img, dtype=np.float64, copy=True)
     h, w, _ = img.shape
@@ -629,7 +658,12 @@ def embed_midband_dct_watermark(
     if n_bits == 0:
         return srgb_img.copy()
 
-    coords = _MIDBAND_COORDS_5 if num_midband_coords == 5 else _MIDBAND_COORDS
+    if num_midband_coords == 5:
+        coords = _MIDBAND_COORDS_5
+    elif num_midband_coords == 1:
+        coords = [_MIDBAND_COORDS[0]]
+    else:
+        coords = _MIDBAND_COORDS
     m_count = len(coords)
 
     # Retain floating-point ITU-R BT.601 luminance without intermediate integer rounding
@@ -644,12 +678,15 @@ def embed_midband_dct_watermark(
 
     for by in range(bh_max):
         for bx in range(bw_max):
+            if num_midband_coords == 1 and block_idx >= n_bits:
+                break
             y0, x0 = by * 8, bx * 8
             block = y_mod[y0 : y0 + 8, x0 : x0 + 8] - 128.0
             dct_block = _DCT8_M @ block @ _DCT8_MT
 
             for m_idx, (u, v) in enumerate(coords):
-                bit_pos = (m_count * block_idx + m_idx) % n_bits
+                row_off = (4 * by) if row_shift_interleave else 0
+                bit_pos = (m_count * block_idx + row_off + m_idx) % n_bits
                 bit = int(payload_bits[bit_pos]) & 1
                 coeff = dct_block[u, v]
                 # Dithered QIM quantization with half-up rounding floor(x + 0.5)
@@ -676,10 +713,14 @@ def extract_midband_dct_watermark(
     num_midband_coords: int = 4,
     secret_key: Optional[bytes] = None,
     return_hard_vote_stats: bool = False,
+    voting_mode: str = "clipped_soft",
+    row_shift_interleave: bool = False,
 ) -> Any:
     """
     Blindly extract the embedded payload_len-bit watermark from mid-band 8x8 DCT
-    coefficients via soft-margin and hard-decision majority voting across blocks.
+    coefficients via bounded/clipped soft-margin (`voting_mode="clipped_soft"`, where each
+    block's coset distance margin is bounded in [0, 1]) or hard-decision majority voting
+    (`voting_mode="hard"`) across R interleaved blocks.
     Returns `(extracted_bits, mean_confidence)` by default, or
     `(extracted_bits, mean_confidence, raw_hard_votes_zero, raw_hard_votes_one)`
     if `return_hard_vote_stats=True`.
@@ -688,7 +729,12 @@ def extract_midband_dct_watermark(
     h, w, _ = img.shape
     y_chan = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
 
-    coords = _MIDBAND_COORDS_5 if num_midband_coords == 5 else _MIDBAND_COORDS
+    if num_midband_coords == 5:
+        coords = _MIDBAND_COORDS_5
+    elif num_midband_coords == 1:
+        coords = [_MIDBAND_COORDS[0]]
+    else:
+        coords = _MIDBAND_COORDS
     m_count = len(coords)
 
     votes_zero = np.zeros(payload_len, dtype=np.float64)
@@ -704,12 +750,15 @@ def extract_midband_dct_watermark(
 
     for by in range(bh_max):
         for bx in range(bw_max):
+            if num_midband_coords == 1 and block_idx >= payload_len:
+                break
             y0, x0 = by * 8, bx * 8
             block = y_chan[y0 : y0 + 8, x0 : x0 + 8] - 128.0
             dct_block = _DCT8_M @ block @ _DCT8_MT
 
             for m_idx, (u, v) in enumerate(coords):
-                bit_pos = (m_count * block_idx + m_idx) % payload_len
+                row_off = (4 * by) if row_shift_interleave else 0
+                bit_pos = (m_count * block_idx + row_off + m_idx) % payload_len
                 coeff = dct_block[u, v]
                 base_dither = dither_mat[block_idx, m_idx]
                 q0 = math.floor(((coeff - base_dither) / qim_step) + 0.5) * qim_step + base_dither
@@ -717,11 +766,14 @@ def extract_midband_dct_watermark(
                 d1 = base_dither + qim_step / 2.0
                 q1 = math.floor(((coeff - d1) / qim_step) + 0.5) * qim_step + d1
                 dist1 = abs(coeff - q1)
+                # Clipped coset vote in [0, 1] per block prevents any single tampered block
+                # from contributing weight > 1.0
+                clipped_margin = min(1.0, max(0.0, abs(dist1 - dist0) / (qim_step * 0.5 + 1e-9)))
                 if dist0 <= dist1:
-                    votes_zero[bit_pos] += (dist1 - dist0) / (qim_step * 0.5 + 1e-9)
+                    votes_zero[bit_pos] += clipped_margin
                     hard_zero[bit_pos] += 1
                 else:
-                    votes_one[bit_pos] += (dist0 - dist1) / (qim_step * 0.5 + 1e-9)
+                    votes_one[bit_pos] += clipped_margin
                     hard_one[bit_pos] += 1
 
             block_idx += 1
@@ -729,13 +781,22 @@ def extract_midband_dct_watermark(
     extracted: List[int] = []
     confidences: List[float] = []
     for i in range(payload_len):
-        tot = votes_zero[i] + votes_one[i] + 1e-9
-        if votes_one[i] > votes_zero[i]:
-            extracted.append(1)
-            confidences.append(float(votes_one[i] / tot))
+        if voting_mode == "hard":
+            tot_h = float(hard_zero[i] + hard_one[i]) + 1e-9
+            if hard_one[i] > hard_zero[i] or (hard_one[i] == hard_zero[i] and votes_one[i] > votes_zero[i]):
+                extracted.append(1)
+                confidences.append(float(hard_one[i] / tot_h))
+            else:
+                extracted.append(0)
+                confidences.append(float(hard_zero[i] / tot_h))
         else:
-            extracted.append(0)
-            confidences.append(float(votes_zero[i] / tot))
+            tot = votes_zero[i] + votes_one[i] + 1e-9
+            if votes_one[i] > votes_zero[i]:
+                extracted.append(1)
+                confidences.append(float(votes_one[i] / tot))
+            else:
+                extracted.append(0)
+                confidences.append(float(votes_zero[i] / tot))
 
     if return_hard_vote_stats:
         return extracted, float(np.mean(confidences)), hard_zero, hard_one
@@ -786,9 +847,17 @@ def measure_qim_export_self_noise(
             block_idx += 1
 
     err_arr = np.asarray(errors, dtype=np.float64)
+    ac_bounds = compute_dct8_ac_l1_rounding_bounds()
+    theo_bound = (
+        ac_bounds["m5_max_ac_rounding_bound"]
+        if num_midband_coords == 5
+        else ac_bounds["m4_max_ac_rounding_bound"]
+    )
     return {
         "rms_export_noise": float(np.sqrt(np.mean(err_arr ** 2))),
         "var_export_noise": float(np.mean(err_arr ** 2)),
+        "theoretical_interior_var_round": 1.0 / 12.0,
+        "theoretical_ac_l1_max_bound": float(theo_bound),
         "max_export_noise": float(np.max(err_arr)),
         "single_coeff_error_rate_export": float(np.mean(err_arr >= (qim_step / 4.0))),
     }
@@ -802,13 +871,18 @@ def localize_dct_qim_tamper_blocks(
     num_midband_coords: int = 4,
     secret_key: Optional[bytes] = None,
     payload_len: int = 64,
+    voting_mode: str = "hard",
+    row_shift_interleave: bool = False,
 ) -> List[Tuple[int, int]]:
     """
     Localize spatial tampering to specific 8x8 DCT blocks (by, bx) by evaluating
     coset lattice deviation dist(F_tilde_b(u,v), Lambda_{w_hat_i}).
     - Operates blindly without a source registry when `expected_bits is None` by first
-      recovering the multi-block majority-voted payload w_hat across all R blocks!
+      recovering the multi-block hard/clipped-soft majority-voted payload w_hat across all R blocks!
     - Requires only (qim_step, secret_key).
+    - Guarantees exact blind payload recovery w_hat_i = w_i whenever the tampered block set T
+      intersects each bit i's repetition support B_i in strictly fewer than R/2 blocks
+      (|T cap B_i| <= floor((R-1)/2)).
     - In uncompressed mode: flags block if max_{(u,v)} dist > tau_coset = qim_step / 4.0 (3.5).
     - In JPEG-resilient mode: flags block if >= 3 modes exceed 0.4 * qim_step.
     """
@@ -819,6 +893,8 @@ def localize_dct_qim_tamper_blocks(
             qim_step=qim_step,
             num_midband_coords=num_midband_coords,
             secret_key=secret_key,
+            voting_mode=voting_mode,
+            row_shift_interleave=row_shift_interleave,
         )
 
     coords = _MIDBAND_COORDS_5 if num_midband_coords == 5 else _MIDBAND_COORDS
@@ -840,7 +916,8 @@ def localize_dct_qim_tamper_blocks(
             dct_block = _DCT8_M @ block @ _DCT8_MT
             deviations: List[float] = []
             for m_idx, (u, v) in enumerate(coords):
-                bit_pos = (m_count * block_idx + m_idx) % n_bits
+                row_off = (4 * by) if row_shift_interleave else 0
+                bit_pos = (m_count * block_idx + row_off + m_idx) % n_bits
                 w_bit = int(expected_bits[bit_pos]) & 1
                 dither = dither_mat[block_idx, m_idx] + (qim_step / 2.0) * w_bit
                 coeff = dct_block[u, v]
@@ -1601,9 +1678,10 @@ class AgentGhibliLockCompiler:
                 smooth_ll = trans_dwt.ll.copy()
             else:
                 if motion_compensated:
-                    # Estimate global camera translation on source LL_K and check if candidate co-moves
+                    # Estimate global camera translation on source LL_K and warp recurrent LL_K^(t-1)
                     dy_s, dx_s = self._estimate_subband_shift(prev_src_ll, src_dwt.ll)
                     warped_prev_src = np.roll(np.roll(prev_src_ll, dy_s, axis=0), dx_s, axis=1)
+                    warped_prev_ll = np.roll(np.roll(prev_ll, dy_s, axis=0), dx_s, axis=1)
                     # Convert subband difference to L* [0, 100] scale via 2^(-K)
                     mot_diff_lstar = np.abs(src_dwt.ll - warped_prev_src) / scale_k
                     beta_map = np.where(
@@ -1611,7 +1689,7 @@ class AgentGhibliLockCompiler:
                         temporal_ema_beta * np.exp(-(mot_diff_lstar ** 2) / (2.0 * (motion_gate_sigma ** 2))),
                         temporal_ema_beta,
                     )
-                    smooth_ll = beta_map * prev_ll + (1.0 - beta_map) * trans_dwt.ll
+                    smooth_ll = beta_map * warped_prev_ll + (1.0 - beta_map) * trans_dwt.ll
                     smooth_ll += target_ll_mean - float(np.mean(smooth_ll))
                 else:
                     smooth_ll = temporal_ema_beta * prev_ll + (1.0 - temporal_ema_beta) * trans_dwt.ll
@@ -1702,14 +1780,21 @@ def deflicker_video_gop_baselines(
       1. Pixel_Space_EMA: Unwarped frame-to-frame pixel EMA
          I_ema^(t) = beta * I_ema^(t-1) + (1-beta) * I_cand^(t).
          Suppresses global flicker partially but blurs moving edges.
-      2. Global_Lum_Hist_Lock: Unwarped global affine luminance mean locking (without
+      2. Motion_Comp_Pixel_EMA: Translation-compensated pixel-space EMA
+         I_ema^(t) = beta * T_{dy,dx}(I_ema^(t-1)) + (1-beta) * I_cand^(t).
+         Reduces camera-pan ghosting relative to unwarped pixel EMA, but still
+         lacks wavelet detail locking and retains residual exposure flicker.
+      3. Global_Lum_Hist_Lock: Unwarped global affine luminance mean locking (without
          wavelet detail lock or local LL_K smoothing). Eliminates global frame-mean jumps
          but neither restores high-frequency edges nor attenuates local LL_K tile noise.
+      4. Ungated_Motion_Wavelet_EMA: Motion-compensated wavelet LL_K EMA with the
+         innovation gate disabled (beta_t == beta everywhere), isolating the benefit
+         of innovation gating on fast-moving non-rigid foreground objects.
     """
     style_lab = srgb_to_lab(style_ref_rgb)
     ref_mean = float(np.mean(style_lab[..., 0]))
 
-    # Baseline 1: Pixel-Space Frame-to-Frame EMA
+    # Baseline 1: Unwarped Pixel-Space Frame-to-Frame EMA
     ema_frames: List[np.ndarray] = []
     ema_ssim: List[float] = []
     prev_f: Optional[np.ndarray] = None
@@ -1729,7 +1814,32 @@ def deflicker_video_gop_baselines(
     ema_means = [float(np.mean(srgb_to_lab(f)[..., 0])) for f in ema_frames]
     ema_flicker_var = float(np.var(np.diff(ema_means))) if len(ema_means) > 1 else 0.0
 
-    # Baseline 2: Global Affine Luminance Mean Locking (without DWT detail lock)
+    # Baseline 2: Motion-Compensated Pixel-Space EMA
+    mc_ema_frames: List[np.ndarray] = []
+    mc_ema_ssim: List[float] = []
+    prev_mc_f: Optional[np.ndarray] = None
+    prev_src_lum: Optional[np.ndarray] = None
+    for src_f, cand_f in zip(src_frames_rgb, candidate_frames_rgb):
+        src_lab = srgb_to_lab(src_f)
+        s_lum = src_lab[..., 0]
+        cand_f_float = cand_f.astype(np.float64)
+        if prev_mc_f is None or prev_src_lum is None:
+            cur_mc = cand_f_float
+        else:
+            dy_p, dx_p = AgentGhibliLockCompiler._estimate_subband_shift(prev_src_lum, s_lum, max_shift=6)
+            warped_prev = np.roll(np.roll(prev_mc_f, dy_p, axis=0), dx_p, axis=1)
+            cur_mc = temporal_ema_beta * warped_prev + (1.0 - temporal_ema_beta) * cand_f_float
+        prev_mc_f = cur_mc
+        prev_src_lum = s_lum
+        out_mc_u8 = np.clip(np.round(cur_mc), 0, 255).astype(np.uint8)
+        mc_ema_frames.append(out_mc_u8)
+        mc_lab = srgb_to_lab(out_mc_u8)
+        mc_ema_ssim.append(compute_wavelet_edge_ssim(s_lum, mc_lab[..., 0]))
+
+    mc_ema_means = [float(np.mean(srgb_to_lab(f)[..., 0])) for f in mc_ema_frames]
+    mc_ema_flicker_var = float(np.var(np.diff(mc_ema_means))) if len(mc_ema_means) > 1 else 0.0
+
+    # Baseline 3: Global Affine Luminance Mean Locking (without DWT detail lock)
     hist_frames: List[np.ndarray] = []
     hist_ssim: List[float] = []
     for src_f, cand_f in zip(src_frames_rgb, candidate_frames_rgb):
@@ -1743,14 +1853,34 @@ def deflicker_video_gop_baselines(
     hist_means = [float(np.mean(srgb_to_lab(f)[..., 0])) for f in hist_frames]
     hist_flicker_var = float(np.var(np.diff(hist_means))) if len(hist_means) > 1 else 0.0
 
+    # Baseline 4: Ungated Motion-Compensated Wavelet LL_K EMA (motion_gate_sigma -> inf)
+    comp_ungated = AgentGhibliLockCompiler()
+    ungated_res = comp_ungated.compile_video_gop(
+        src_frames_rgb,
+        candidate_frames_rgb,
+        style_ref_rgb,
+        temporal_ema_beta=temporal_ema_beta,
+        motion_compensated=True,
+        motion_gate_sigma=1e9,
+    )
+
     return {
         "Pixel_Space_EMA": {
             "post_flicker_variance": round(ema_flicker_var, 4),
             "mean_post_edge_ssim": round(float(np.mean(ema_ssim)), 4),
         },
+        "Motion_Comp_Pixel_EMA": {
+            "post_flicker_variance": round(mc_ema_flicker_var, 4),
+            "mean_post_edge_ssim": round(float(np.mean(mc_ema_ssim)), 4),
+        },
         "Global_Lum_Hist_Lock": {
             "post_flicker_variance": round(hist_flicker_var, 4),
             "mean_post_edge_ssim": round(float(np.mean(hist_ssim)), 4),
+        },
+        "Ungated_Motion_Wavelet_EMA": {
+            "post_flicker_variance": round(ungated_res["post_flicker_variance"], 4),
+            "post_local_ll_variance": round(ungated_res["post_local_ll_variance"], 4),
+            "mean_post_edge_ssim": round(ungated_res["mean_post_edge_ssim"], 4),
         },
     }
 
