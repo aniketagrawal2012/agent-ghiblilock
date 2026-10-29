@@ -27,17 +27,21 @@ Core Components:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import dataclasses
 import hashlib
 import hmac
 import json
 import math
+import os
 import struct
 import time
 import zlib
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+_SORT_POOL = ThreadPoolExecutor(max_workers=min(10, os.cpu_count() or 4))
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +61,7 @@ def srgb_to_lab(rgb: np.ndarray) -> np.ndarray:
         [0.2126729, 0.7151522, 0.0721750],
         [0.0193339, 0.1191920, 0.9503041],
     ], dtype=np.float64)
-    xyz = np.einsum("ij,...j->...i", m_rgb2xyz, linear)
+    xyz = np.matmul(linear, m_rgb2xyz.T)
 
     # Normalize by D65 white point
     xn, yn, zn = 0.95047, 1.00000, 1.08883
@@ -104,7 +108,7 @@ def lab_to_srgb(lab: np.ndarray) -> np.ndarray:
         [-0.9692660,  1.8760108,  0.0415560],
         [ 0.0556434, -0.2040259,  1.0572252],
     ], dtype=np.float64)
-    linear = np.einsum("ij,...j->...i", m_xyz2rgb, xyz)
+    linear = np.matmul(xyz, m_xyz2rgb.T)
     linear = np.clip(linear, 0.0, 1.0)
 
     srgb = np.where(
@@ -119,6 +123,16 @@ def lab_to_srgb(lab: np.ndarray) -> np.ndarray:
 # 2. Orthonormal 2D Discrete Haar Wavelet Transform (DWT2 / IDWT2)
 # ---------------------------------------------------------------------------
 
+# Symmetric orthonormal 4x4 2D Haar analysis/synthesis matrix H_2 (H_2^T = H_2^-1 = H_2)
+_HAAR2_M = 0.5 * np.array([
+    [1.0,  1.0,  1.0,  1.0],
+    [1.0, -1.0,  1.0, -1.0],
+    [1.0,  1.0, -1.0, -1.0],
+    [1.0, -1.0, -1.0,  1.0],
+], dtype=np.float64)
+_HAAR2_MT = _HAAR2_M.T
+
+
 @dataclasses.dataclass
 class WaveletDecomposition2D:
     """Multi-level 2D Discrete Haar Wavelet decomposition."""
@@ -127,23 +141,41 @@ class WaveletDecomposition2D:
     original_shape: Tuple[int, int]
 
 
-def _dwt2_single_level(channel: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Single-level orthonormal 2D Haar DWT on an even-sized 2D array."""
+def _dwt2_single_level(
+    channel: np.ndarray,
+    vectorized: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Single-level orthonormal 2D Haar DWT via 4D tensor contraction (H/2, 2, W/2, 2)
+    with _HAAR2_M (`vectorized=True`) or explicit 2x2 block-loop execution (`vectorized=False`).
+    """
     h, w = channel.shape
     if h % 2 != 0:
         channel = np.pad(channel, ((0, 1), (0, 0)), mode="edge")
     if w % 2 != 0:
         channel = np.pad(channel, ((0, 0), (0, 1)), mode="edge")
 
-    c00 = channel[0::2, 0::2]
-    c01 = channel[0::2, 1::2]
-    c10 = channel[1::2, 0::2]
-    c11 = channel[1::2, 1::2]
+    bh, bw = channel.shape[0] // 2, channel.shape[1] // 2
+    if vectorized:
+        # Reshape 2D plane into 4D tensor (bh, 2, bw, 2) -> (bh, bw, 4) and contract with H_2^T
+        tiles_4d = channel.reshape(bh, 2, bw, 2).swapaxes(1, 2).reshape(bh, bw, 4)
+        subbands = np.matmul(tiles_4d, _HAAR2_MT)
+        return subbands[..., 0], subbands[..., 1], subbands[..., 2], subbands[..., 3]
 
-    ll = 0.5 * (c00 + c01 + c10 + c11)
-    lh = 0.5 * (c00 - c01 + c10 - c11)  # Horizontal gradient / vertical edge detail
-    hl = 0.5 * (c00 + c01 - c10 - c11)  # Vertical gradient / horizontal edge detail
-    hh = 0.5 * (c00 - c01 - c10 + c11)  # Diagonal detail
+    ll = np.empty((bh, bw), dtype=np.float64)
+    lh = np.empty((bh, bw), dtype=np.float64)
+    hl = np.empty((bh, bw), dtype=np.float64)
+    hh = np.empty((bh, bw), dtype=np.float64)
+    for u in range(bh):
+        u2 = 2 * u
+        for v in range(bw):
+            v2 = 2 * v
+            bvec = channel[u2 : u2 + 2, v2 : v2 + 2].reshape(1, 4)
+            svec = np.matmul(bvec, _HAAR2_MT)[0]
+            ll[u, v] = svec[0]
+            lh[u, v] = svec[1]
+            hl[u, v] = svec[2]
+            hh[u, v] = svec[3]
     return ll, lh, hl, hh
 
 
@@ -153,24 +185,40 @@ def _idwt2_single_level(
     hl: np.ndarray,
     hh: np.ndarray,
     target_shape: Tuple[int, int],
+    vectorized: bool = True,
 ) -> np.ndarray:
-    """Single-level orthonormal 2D Haar inverse DWT."""
-    h_half, w_half = ll.shape
-    out = np.zeros((h_half * 2, w_half * 2), dtype=np.float64)
-    out[0::2, 0::2] = 0.5 * (ll + lh + hl + hh)
-    out[0::2, 1::2] = 0.5 * (ll - lh + hl - hh)
-    out[1::2, 0::2] = 0.5 * (ll + lh - hl - hh)
-    out[1::2, 1::2] = 0.5 * (ll - lh - hl + hh)
+    """
+    Single-level orthonormal 2D Haar inverse DWT via 4D tensor contraction (`vectorized=True`)
+    or explicit 2x2 block-loop execution (`vectorized=False`).
+    """
+    bh, bw = ll.shape
+    if vectorized:
+        subbands = np.stack([ll, lh, hl, hh], axis=-1)
+        tiles_4d = np.matmul(subbands, _HAAR2_M).reshape(bh, bw, 2, 2).swapaxes(1, 2)
+        out = tiles_4d.reshape(bh * 2, bw * 2)
+        return out[: target_shape[0], : target_shape[1]]
+
+    out = np.empty((bh * 2, bw * 2), dtype=np.float64)
+    for u in range(bh):
+        u2 = 2 * u
+        for v in range(bw):
+            v2 = 2 * v
+            svec = np.array([[ll[u, v], lh[u, v], hl[u, v], hh[u, v]]], dtype=np.float64)
+            out[u2 : u2 + 2, v2 : v2 + 2] = np.matmul(svec, _HAAR2_M).reshape(2, 2)
     return out[: target_shape[0], : target_shape[1]]
 
 
-def dwt2_multilevel(channel: np.ndarray, levels: int = 2) -> WaveletDecomposition2D:
+def dwt2_multilevel(
+    channel: np.ndarray,
+    levels: int = 2,
+    vectorized: bool = True,
+) -> WaveletDecomposition2D:
     """Perform K-level 2D Haar wavelet decomposition."""
     cur = np.asarray(channel, dtype=np.float64)
     orig_shape = cur.shape
     details_fine_to_coarse: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     for _ in range(levels):
-        ll, lh, hl, hh = _dwt2_single_level(cur)
+        ll, lh, hl, hh = _dwt2_single_level(cur, vectorized=vectorized)
         details_fine_to_coarse.append((lh, hl, hh))
         cur = ll
     # Store from coarse (level K) to fine (level 1)
@@ -181,7 +229,10 @@ def dwt2_multilevel(channel: np.ndarray, levels: int = 2) -> WaveletDecompositio
     )
 
 
-def idwt2_multilevel(decomp: WaveletDecomposition2D) -> np.ndarray:
+def idwt2_multilevel(
+    decomp: WaveletDecomposition2D,
+    vectorized: bool = True,
+) -> np.ndarray:
     """Exact inverse of dwt2_multilevel."""
     cur = decomp.ll
     num_levels = len(decomp.details)
@@ -195,7 +246,7 @@ def idwt2_multilevel(decomp: WaveletDecomposition2D) -> np.ndarray:
     shapes = list(reversed(shapes))
 
     for lvl_idx, (lh, hl, hh) in enumerate(decomp.details):
-        cur = _idwt2_single_level(cur, lh, hl, hh, shapes[lvl_idx])
+        cur = _idwt2_single_level(cur, lh, hl, hh, shapes[lvl_idx], vectorized=vectorized)
     return cur
 
 
@@ -217,69 +268,117 @@ def _downsample_mask_to_shape(mask: np.ndarray, target_shape: Tuple[int, int]) -
     return np.clip(cur[:th, :tw], 0.0, 1.0)
 
 
+def compute_sobel_coherence_5x5(src_lum: np.ndarray) -> np.ndarray:
+    """
+    Compute 5x5 Sobel directional coherence map C_{5x5}(x, y) in [0, 1]^(H x W):
+        C_{5x5}(x,y) = sqrt((B_5 * G_x)^2 + (B_5 * G_y)^2) / (B_5 * sqrt(G_x^2 + G_y^2) + 1e-6),
+    using replicate ('edge') boundary padding for both the 3x3 Sobel filter and 5x5 box filter B_5.
+    """
+    lum = np.asarray(src_lum, dtype=np.float64)
+    if lum.shape[0] < 3 or lum.shape[1] < 3:
+        return np.ones_like(lum, dtype=np.float64)
+    p = np.pad(lum, 1, mode="edge")
+    gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
+    gy = (p[2:, :-2] + 2.0 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[:-2, 1:-1] + p[:-2, 2:])
+    mag = np.sqrt(gx ** 2 + gy ** 2)
+
+    def _box5(arr: np.ndarray) -> np.ndarray:
+        pa = np.pad(arr, 2, mode="edge")
+        acc = np.zeros_like(arr, dtype=np.float64)
+        for dy in range(5):
+            for dx in range(5):
+                acc += pa[dy : dy + arr.shape[0], dx : dx + arr.shape[1]]
+        return acc / 25.0
+
+    coh = np.sqrt(_box5(gx) ** 2 + _box5(gy) ** 2) / (_box5(mag) + 1e-6)
+    return np.clip(coh, 0.0, 1.0)
+
+
 def build_spatial_roi_detail_mask(
     src_lum: np.ndarray,
     background_floor: float = 0.0,
     dilation_radius: int = 2,
+    coherence_threshold: float = 0.35,
 ) -> np.ndarray:
     """
-    Construct a smooth spatially masked ROI weighting map M_ROI(x, y) in [0, 1]^(H x W)
-    from the source high-frequency structural locus M_HF weighted by 5x5 Sobel directional
-    coherence (so coherent contours, emblems, and rails receive weight 1.0, while isolated
-    photographic sensor grain and flat background regions receive `background_floor`).
+    Construct the exact closed-form spatially masked ROI weighting map M_ROI(x, y) in [0, 1]^(H x W)
+    from E_full(L*_src) weighted by 5x5 Sobel directional coherence C_{5x5}(x, y):
+        W_edge(x, y) = E_full(L*_src)(x, y) * C_{5x5}(x, y)^3,
+        M_ROI(x, y)  = clip( B_3 * Dilate_{5x5}(W_edge * 1{C_{5x5} >= 0.35}) / max(max W_edge, 1e-8), 0, 1 ).
+    Coherent contours, emblems, and rails satisfy C_{5x5} >= 0.35 and undergo 5x5 square
+    (l_inf radius 2 px) grayscale morphological max-dilation followed by 3x3 box feathering B_3,
+    whereas isolated background sensor grain (C_{5x5} < 0.35) is zeroed prior to dilation.
     """
     lum = np.asarray(src_lum, dtype=np.float64)
     edge_map = compute_structural_edge_map(lum)
     if lum.shape[0] >= 5 and lum.shape[1] >= 5:
-        p = np.pad(lum, 1, mode="edge")
-        gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
-        gy = (p[2:, :-2] + 2.0 * p[2:, 1:-1] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[:-2, 1:-1] + p[:-2, 2:])
-        mag = np.sqrt(gx ** 2 + gy ** 2)
-
-        def _box5(arr: np.ndarray) -> np.ndarray:
-            pa = np.pad(arr, 2, mode="edge")
-            acc = np.zeros_like(arr, dtype=np.float64)
-            for dy in range(5):
-                for dx in range(5):
-                    acc += pa[dy : dy + arr.shape[0], dx : dx + arr.shape[1]]
-            return acc / 25.0
-
-        coh = np.sqrt(_box5(gx) ** 2 + _box5(gy) ** 2) / (_box5(mag) + 1e-6)
-        weighted_edge = edge_map * (coh ** 3)
+        coh = compute_sobel_coherence_5x5(lum)
+        w_edge = edge_map * (coh ** 3)
+        w_gated = np.where(coh >= coherence_threshold, w_edge, 0.0)
     else:
-        weighted_edge = edge_map
+        w_edge = edge_map
+        w_gated = edge_map
 
-    thresh = max(float(np.quantile(weighted_edge, 0.85)), 0.14)
-    core_mask = (weighted_edge >= thresh).astype(np.float64)
-    dilated = core_mask.copy()
-    for dy in range(-dilation_radius, dilation_radius + 1):
-        for dx in range(-dilation_radius, dilation_radius + 1):
-            if dy * dy + dx * dx <= dilation_radius * dilation_radius + 1:
-                shifted = np.roll(np.roll(core_mask, dy, axis=0), dx, axis=1)
-                dilated = np.maximum(dilated, shifted)
-    # Smooth 3x3 box feathering at ROI boundary
+    r = max(0, int(dilation_radius))
+    if r > 0:
+        pad_w = np.pad(w_gated, r, mode="edge")
+        dilated = np.zeros_like(w_gated, dtype=np.float64)
+        for dy in range(2 * r + 1):
+            for dx in range(2 * r + 1):
+                dilated = np.maximum(dilated, pad_w[dy : dy + lum.shape[0], dx : dx + lum.shape[1]])
+    else:
+        dilated = w_gated.copy()
+
+    # Smooth 3x3 normalized box feathering B_3 with replicate padding
     padded = np.pad(dilated, 1, mode="edge")
-    smooth = (
+    b3_smooth = (
         padded[:-2, :-2] + padded[:-2, 1:-1] + padded[:-2, 2:]
         + padded[1:-1, :-2] + padded[1:-1, 1:-1] + padded[1:-1, 2:]
         + padded[2:, :-2] + padded[2:, 1:-1] + padded[2:, 2:]
     ) / 9.0
-    roi_map = background_floor + (1.0 - background_floor) * np.maximum(core_mask, smooth)
+    norm_denom = max(float(np.max(w_edge)), 1e-8)
+    m_roi = np.clip(b3_smooth / norm_denom, 0.0, 1.0)
+    roi_map = background_floor + (1.0 - background_floor) * m_roi
     return np.clip(roi_map, 0.0, 1.0)
+
+
+def apply_interior_dc_reanchoring(
+    lum_clip: np.ndarray,
+    target_mean_lum: float,
+) -> Tuple[np.ndarray, float]:
+    """
+    Apply interior DC re-anchoring over unsaturated pixels I^o = {(x,y) : lum_clip(x,y) in (1, 99)}
+    with explicit guard for |I^o| = 0 and per-pixel shift cap |delta_DC| <= 1.0:
+        delta_DC = sign(Delta_mu) * min(|Delta_mu| * HW / |I^o|, 1.0)  if |I^o| > 0 else 0.0,
+        L*(x,y)  = clip(lum_clip(x,y) + delta_DC * 1{(x,y) in I^o}, 0, 100).
+    Returns (reanchored_lum, delta_dc).
+    """
+    out = np.array(lum_clip, dtype=np.float64, copy=True)
+    delta_mu = float(target_mean_lum) - float(np.mean(out))
+    if abs(delta_mu) <= 1e-12:
+        return out, 0.0
+    interior = (out > 1.0) & (out < 99.0)
+    n_interior = int(np.sum(interior))
+    if n_interior == 0:
+        return out, 0.0
+    raw_shift = abs(delta_mu) * (float(out.size) / float(n_interior))
+    delta_dc = math.copysign(min(raw_shift, 1.0), delta_mu)
+    out[interior] = np.clip(out[interior] + delta_dc, 0.0, 100.0)
+    return out, delta_dc
 
 
 # ---------------------------------------------------------------------------
 # 3. Structural Edge Mask & Wavelet-Edge SSIM Metric
 # ---------------------------------------------------------------------------
 
-def compute_structural_edge_map(luminance: np.ndarray) -> np.ndarray:
+def compute_structural_edge_map(luminance: np.ndarray, vectorized: bool = True) -> np.ndarray:
     """
     Compute high-frequency structural edge magnitude map E_full(L*) in [0, 1]^(H x W)
     from Level-1 Haar DWT subbands upsampled 2x via nearest-neighbor interpolation
     and normalized by max(max_{u,v} E_{1/2}(u,v), 1e-8).
     """
     lum = np.asarray(luminance, dtype=np.float64)
-    _, lh1, hl1, hh1 = _dwt2_single_level(lum)
+    _, lh1, hl1, hh1 = _dwt2_single_level(lum, vectorized=vectorized)
     energy_half = np.sqrt(lh1 ** 2 + hl1 ** 2 + 0.5 * (hh1 ** 2))
     # Nearest-neighbor 2x upsample back to original dimensions
     energy_full = np.repeat(np.repeat(energy_half, 2, axis=0), 2, axis=1)
@@ -292,6 +391,7 @@ def compute_wavelet_edge_ssim(
     src_lum: np.ndarray,
     out_lum: np.ndarray,
     roi_mask: Optional[np.ndarray] = None,
+    vectorized: bool = True,
 ) -> float:
     """
     Compute global Structural Similarity Index (SSIM_edge) over the normalized
@@ -299,8 +399,8 @@ def compute_wavelet_edge_ssim(
     c_1 = 0.01^2, c_2 = 0.03^2. If `roi_mask` is provided, evaluates over the
     active ROI locus (roi_mask >= 0.5).
     """
-    e1 = compute_structural_edge_map(src_lum)
-    e2 = compute_structural_edge_map(out_lum)
+    e1 = compute_structural_edge_map(src_lum, vectorized=vectorized)
+    e2 = compute_structural_edge_map(out_lum, vectorized=vectorized)
     if roi_mask is not None:
         active = np.asarray(roi_mask) >= 0.5
         if np.any(active):
@@ -321,7 +421,11 @@ def compute_wavelet_edge_ssim(
     return float(np.clip(num / den, 0.0, 1.0))
 
 
-def compute_full_luminance_ssim(src_lum: np.ndarray, out_lum: np.ndarray) -> float:
+def compute_full_luminance_ssim(
+    src_lum: np.ndarray,
+    out_lum: np.ndarray,
+    vectorized: bool = True,
+) -> float:
     """
     Compute non-circular full-band spatial Structural Similarity Index (SSIM_full)
     directly over non-overlapping 4x4 spatial luminance patches (L* / 100.0, stride 4,
@@ -334,6 +438,23 @@ def compute_full_luminance_ssim(src_lum: np.ndarray, out_lum: np.ndarray) -> flo
     c3 = c2 / 2.0
     h, w = x.shape
     win = 4
+    bh, bw = h // win, w // win
+    if vectorized and bh >= 1 and bw >= 1:
+        xb = x[: bh * win, : bw * win].reshape(bh, win, bw, win).swapaxes(1, 2).reshape(-1, 16)
+        yb = y[: bh * win, : bw * win].reshape(bh, win, bw, win).swapaxes(1, 2).reshape(-1, 16)
+        mux = np.mean(xb, axis=1, keepdims=True)
+        muy = np.mean(yb, axis=1, keepdims=True)
+        dx = xb - mux
+        dy = yb - muy
+        sx_sq = np.mean(dx * dx, axis=1)
+        sy_sq = np.mean(dy * dy, axis=1)
+        sx = np.sqrt(sx_sq)
+        sy = np.sqrt(sy_sq)
+        sxy = np.mean(dx * dy, axis=1)
+        contrast = (2.0 * sx * sy + c2) / (sx_sq + sy_sq + c2)
+        struct_corr = np.maximum(0.0, (sxy + c3) / (sx * sy + c3))
+        return float(np.mean(np.clip(contrast * struct_corr, 0.0, 1.0)))
+
     ssim_vals: List[float] = []
     for r in range(0, max(1, h - win + 1), 4):
         for c in range(0, max(1, w - win + 1), 4):
@@ -350,7 +471,11 @@ def compute_full_luminance_ssim(src_lum: np.ndarray, out_lum: np.ndarray) -> flo
     return float(np.mean(ssim_vals)) if ssim_vals else 0.0
 
 
-def compute_sobel_gradient_correlation(src_lum: np.ndarray, out_lum: np.ndarray) -> float:
+def compute_sobel_gradient_correlation(
+    src_lum: np.ndarray,
+    out_lum: np.ndarray,
+    vectorized: bool = True,
+) -> float:
     """
     Compute signed 3x3 Sobel spatial gradient inner-product correlation rho_grad
     over the interior source structural edge locus M_HF^o (sensitive to edge polarity
@@ -374,7 +499,7 @@ def compute_sobel_gradient_correlation(src_lum: np.ndarray, out_lum: np.ndarray)
 
     gx_s, gy_s = _sobel_xy(s)
     gx_o, gy_o = _sobel_xy(o)
-    edge_map = compute_structural_edge_map(s)[1:-1, 1:-1]
+    edge_map = compute_structural_edge_map(s, vectorized=vectorized)[1:-1, 1:-1]
     thresh = max(float(np.quantile(edge_map, 0.75)), 0.08)
     mask = edge_map >= thresh
     if np.any(mask):
@@ -385,14 +510,18 @@ def compute_sobel_gradient_correlation(src_lum: np.ndarray, out_lum: np.ndarray)
     return float(np.clip(num / den, -1.0, 1.0))
 
 
-def compute_structural_mask_hash(src_lum: np.ndarray, threshold_quantile: float = 0.75) -> Tuple[np.ndarray, str]:
+def compute_structural_mask_hash(
+    src_lum: np.ndarray,
+    threshold_quantile: float = 0.75,
+    vectorized: bool = True,
+) -> Tuple[np.ndarray, str]:
     """
     Extract binary high-frequency structural edge/logo mask M_HF in {0, 1}^(H x W)
     (serialized as 1-byte uint8 0x00/0x01 in row-major C-order) and its canonical
     lowercase hex SHA-256 cryptographic digest (raw row-major uint8 buffer followed
     by 8-byte big-endian dimension trailer struct.pack('>II', H, W)).
     """
-    edge_map = compute_structural_edge_map(src_lum)
+    edge_map = compute_structural_edge_map(src_lum, vectorized=vectorized)
     thresh = float(np.quantile(edge_map, threshold_quantile))
     binary_mask = (edge_map >= max(thresh, 0.08)).astype(np.uint8)
     digest = hashlib.sha256(binary_mask.tobytes() + struct.pack(">II", *binary_mask.shape)).hexdigest()
@@ -421,6 +550,28 @@ def _get_swot_training_axes(swot_steps: int = 8, seed: int = 42) -> np.ndarray:
     return np.vstack(axes_list)  # shape (3 * swot_steps + 3, 3)
 
 
+def _sort_slices_rows(proj_d_by_n: np.ndarray, vectorized: bool = True) -> np.ndarray:
+    """
+    Sort each row of a (D, N) projection matrix in ascending order.
+    Since 1D empirical Wasserstein-2 depends only on sorted values (not indices),
+    any exact comparison sort over float64 produces bit-identical order statistics.
+    """
+    if vectorized:
+        arr = np.array(proj_d_by_n, dtype=np.float64, copy=True, order="C")
+        if arr.shape[1] >= 16384 and arr.shape[0] >= 4:
+            n_chunks = min(8, arr.shape[0])
+            list(
+                _SORT_POOL.map(
+                    lambda c: c.sort(axis=-1, kind="stable"),
+                    np.array_split(arr, n_chunks, axis=0),
+                )
+            )
+            return arr
+        arr.sort(axis=-1, kind="stable")
+        return arr
+    return np.sort(np.ascontiguousarray(proj_d_by_n).T, axis=0, kind="mergesort").T
+
+
 def compute_sliced_wasserstein_lab(
     lab_a: np.ndarray,
     lab_b: np.ndarray,
@@ -428,6 +579,8 @@ def compute_sliced_wasserstein_lab(
     seed: int = 42,
     swot_steps: int = 8,
     use_training_axes: bool = True,
+    vectorized: bool = True,
+    _precomputed_sorted_b: Optional[np.ndarray] = None,
 ) -> float:
     """
     Compute the discrete root-mean-square (RMS) 1D Sliced-Wasserstein-2 distance
@@ -446,14 +599,24 @@ def compute_sliced_wasserstein_lab(
         dirs = rng.normal(size=(num_projections, 3))
         dirs /= np.linalg.norm(dirs, axis=1, keepdims=True) + 1e-12
 
-    proj_a = pts_a @ dirs.T  # (N_a, D)
-    proj_b = pts_b @ dirs.T  # (N_b, D)
-
     if pts_a.shape[0] == pts_b.shape[0]:
-        sa = np.sort(proj_a, axis=0, kind="mergesort")
-        sb = np.sort(proj_b, axis=0, kind="mergesort")
-        w2_sq_per_slice = np.mean((sa - sb) ** 2, axis=0)
+        proj_a = pts_a @ dirs.T
+        if vectorized:
+            sa_t = _sort_slices_rows(proj_a.T, vectorized=True)
+            if _precomputed_sorted_b is not None and _precomputed_sorted_b.shape == sa_t.shape:
+                sb_t = _precomputed_sorted_b
+            else:
+                proj_b = pts_b @ dirs.T
+                sb_t = _sort_slices_rows(proj_b.T, vectorized=True)
+            w2_sq_per_slice = np.mean((sa_t - sb_t) ** 2, axis=1)
+        else:
+            proj_b = pts_b @ dirs.T
+            sa = np.sort(proj_a, axis=0, kind="mergesort")
+            sb = np.sort(proj_b, axis=0, kind="mergesort")
+            w2_sq_per_slice = np.mean((sa - sb) ** 2, axis=0)
     else:
+        proj_a = pts_a @ dirs.T
+        proj_b = pts_b @ dirs.T
         quantiles = np.linspace(0.0, 1.0, 256)
         qa = np.quantile(proj_a, quantiles, axis=0)
         qb = np.quantile(proj_b, quantiles, axis=0)
@@ -467,6 +630,7 @@ def compute_heldout_sliced_wasserstein_lab(
     lab_b: np.ndarray,
     num_projections: int = 64,
     seed: int = 999,
+    vectorized: bool = True,
 ) -> float:
     """
     Out-of-sample root-mean-square Sliced-Wasserstein-2 estimator SW_hat_2^eval
@@ -479,6 +643,7 @@ def compute_heldout_sliced_wasserstein_lab(
         num_projections=num_projections,
         seed=seed,
         use_training_axes=False,
+        vectorized=vectorized,
     )
 
 
@@ -489,6 +654,8 @@ def transport_chromaticity_wasserstein(
     swot_steps: int = 8,
     seed: int = 42,
     anchor_lum_mean: bool = True,
+    vectorized: bool = True,
+    _precomputed_sorted_targ: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Transport content CIELAB distribution toward target artistic style palette
@@ -515,55 +682,114 @@ def transport_chromaticity_wasserstein(
     quantiles = np.linspace(0.0, 1.0, 512)
     base_ranks = np.linspace(0.0, 1.0, n_pts)
 
-    # First pass: coordinate-wise marginal optimal transport along canonical Q_0 = I_3 axes
-    for ch in range(3):
-        order_u = np.argsort(curr[:, ch], kind="mergesort")
-        ranks = np.empty_like(order_u, dtype=np.float64)
-        ranks[order_u] = base_ranks
-        style_q = np.quantile(target[:, ch], quantiles)
-        curr[:, ch] = (1.0 - blend_alpha) * curr[:, ch] + blend_alpha * np.interp(ranks, quantiles, style_q)
+    v_idx = quantiles * (n_pts - 1)
+    lo = np.floor(v_idx).astype(np.int64)
+    hi = np.ceil(v_idx).astype(np.int64)
+    frac = v_idx - lo
+    cached_q_interp: Dict[int, List[np.ndarray]] = {}
 
-    # Iterative Sliced-Wasserstein rotational transport steps for joint 3D (L*, a*, b*) alignment
+    def _argsort_cols(mat_Nx3: np.ndarray) -> List[np.ndarray]:
+        if vectorized and n_pts >= 16384:
+            cols = [np.ascontiguousarray(mat_Nx3[:, d]) for d in range(3)]
+            return list(_SORT_POOL.map(lambda c: np.argsort(c, kind="mergesort"), cols))
+        return [np.argsort(mat_Nx3[:, d], kind="mergesort") for d in range(3)]
+
+    def _quantile_cols(mat_Nx3: Optional[np.ndarray], group_idx: Optional[int] = None) -> List[np.ndarray]:
+        if vectorized:
+            if group_idx is not None and group_idx in cached_q_interp:
+                return cached_q_interp[group_idx]
+            if (
+                group_idx is not None
+                and _precomputed_sorted_targ is not None
+                and _precomputed_sorted_targ.shape == (3 * swot_steps + 3, n_pts)
+            ):
+                sorted_rows = _precomputed_sorted_targ[3 * group_idx : 3 * group_idx + 3]
+            else:
+                assert mat_Nx3 is not None
+                sorted_rows = _sort_slices_rows(mat_Nx3.T, vectorized=True)
+            quants = [
+                np.interp(
+                    base_ranks,
+                    quantiles,
+                    sorted_rows[d, lo] + frac * (sorted_rows[d, hi] - sorted_rows[d, lo]),
+                )
+                for d in range(3)
+            ]
+            if group_idx is not None:
+                cached_q_interp[group_idx] = quants
+            return quants
+        assert mat_Nx3 is not None
+        return [np.quantile(mat_Nx3[:, d], quantiles) for d in range(3)]
+
+    # First pass: coordinate-wise marginal optimal transport along canonical Q_0 = I_3 axes
+    orders_0 = _argsort_cols(curr)
+    t_quants_0 = _quantile_cols(None if (vectorized and _precomputed_sorted_targ is not None) else target, group_idx=0)
+    for ch in range(3):
+        order_u = orders_0[ch]
+        if vectorized:
+            mapped_dim = np.empty(n_pts, dtype=np.float64)
+            mapped_dim[order_u] = t_quants_0[ch]
+        else:
+            ranks = np.empty_like(order_u, dtype=np.float64)
+            ranks[order_u] = base_ranks
+            mapped_dim = np.interp(ranks, quantiles, t_quants_0[ch])
+        curr[:, ch] = (1.0 - blend_alpha) * curr[:, ch] + blend_alpha * mapped_dim
+
+    # Iterative Sliced-Wasserstein rotational transport steps
     rng = np.random.default_rng(seed)
-    rot_frames: List[np.ndarray] = []
-    for _ in range(swot_steps):
-        # Generate Haar-uniform orthonormal 3x3 matrix in O(3) via positive-diagonal QR decomposition
+    rot_frames_ref: List[np.ndarray] = []
+    for m_idx in range(swot_steps):
         z = rng.normal(size=(3, 3))
         q_rot, r_mat = np.linalg.qr(z)
         d_diag = np.diag(r_mat)
         d_sign = np.where(d_diag >= 0.0, 1.0, -1.0)
         q_rot = q_rot * d_sign
-        rot_frames.append(q_rot)
+        rot_frames_ref.append(q_rot)
 
         proj_curr = curr @ q_rot
-        proj_targ = target @ q_rot
+        proj_targ = None if (vectorized and _precomputed_sorted_targ is not None) else (target @ q_rot)
         delta_proj = np.zeros_like(proj_curr)
+        orders_m = _argsort_cols(proj_curr)
+        t_quants_m = _quantile_cols(proj_targ, group_idx=m_idx + 1)
 
         for dim in range(3):
-            order_u = np.argsort(proj_curr[:, dim], kind="mergesort")
-            ranks = np.empty_like(order_u, dtype=np.float64)
-            ranks[order_u] = base_ranks
-            targ_q = np.quantile(proj_targ[:, dim], quantiles)
-            mapped_dim = np.interp(ranks, quantiles, targ_q)
+            order_u = orders_m[dim]
+            if vectorized:
+                mapped_dim = np.empty(n_pts, dtype=np.float64)
+                mapped_dim[order_u] = t_quants_m[dim]
+            else:
+                ranks = np.empty_like(order_u, dtype=np.float64)
+                ranks[order_u] = base_ranks
+                mapped_dim = np.interp(ranks, quantiles, t_quants_m[dim])
             delta_proj[:, dim] = blend_alpha * (mapped_dim - proj_curr[:, dim])
 
         curr = curr + (delta_proj @ q_rot.T)
 
-    # Final canonical-axis and training-frame polish so all D = 3M + 3 training axes contract tightly
-    for q_frame in [np.eye(3, dtype=np.float64)] + rot_frames[-2:]:
+    polish_groups = [(0, np.eye(3, dtype=np.float64))]
+    if len(rot_frames_ref) >= 2:
+        polish_groups.append((len(rot_frames_ref) - 1, rot_frames_ref[-2]))
+        polish_groups.append((len(rot_frames_ref), rot_frames_ref[-1]))
+    elif len(rot_frames_ref) == 1:
+        polish_groups.append((1, rot_frames_ref[-1]))
+
+    for g_idx, q_frame in polish_groups:
         proj_curr = curr @ q_frame
-        proj_targ = target @ q_frame
+        proj_targ = None if (vectorized and _precomputed_sorted_targ is not None) else (target @ q_frame)
         delta_proj = np.zeros_like(proj_curr)
+        orders_p = _argsort_cols(proj_curr)
+        t_quants_p = _quantile_cols(proj_targ, group_idx=g_idx)
         for dim in range(3):
-            order_u = np.argsort(proj_curr[:, dim], kind="mergesort")
-            ranks = np.empty_like(order_u, dtype=np.float64)
-            ranks[order_u] = base_ranks
-            targ_q = np.quantile(proj_targ[:, dim], quantiles)
-            mapped_dim = np.interp(ranks, quantiles, targ_q)
+            order_u = orders_p[dim]
+            if vectorized:
+                mapped_dim = np.empty(n_pts, dtype=np.float64)
+                mapped_dim[order_u] = t_quants_p[dim]
+            else:
+                ranks = np.empty_like(order_u, dtype=np.float64)
+                ranks[order_u] = base_ranks
+                mapped_dim = np.interp(ranks, quantiles, t_quants_p[dim])
             delta_proj[:, dim] = (0.5 * blend_alpha) * (mapped_dim - proj_curr[:, dim])
         curr = curr + (delta_proj @ q_frame.T)
 
-    # Explicit post-Step-A luminance mean re-anchoring: L_tilde* <- L_tilde* + (mu(L_ref*) - mu(L_tilde*))
     if anchor_lum_mean:
         curr[:, 0] += float(np.mean(target[:, 0])) - float(np.mean(curr[:, 0]))
 
@@ -592,6 +818,87 @@ _MIDBAND_COORDS: List[Tuple[int, int]] = [(2, 3), (3, 2), (1, 3), (3, 1)]
 _MIDBAND_COORDS_5: List[Tuple[int, int]] = [(2, 3), (3, 2), (1, 3), (3, 1), (2, 2)]
 
 
+def dct2_blocks_8x8(channel: np.ndarray, vectorized: bool = True) -> np.ndarray:
+    """
+    Transform a 2D luminance array (H, W) into an array of 8x8 Type-II DCT blocks
+    of shape (bh_max, bw_max, 8, 8) using 4D tensor contraction (`vectorized=True`)
+    or explicit Python 8x8 block-loop iteration (`vectorized=False`).
+    Each spatial block is shifted by -128.0 prior to (C_8 * B) * C_8^T.
+    """
+    arr = np.asarray(channel, dtype=np.float64)
+    bh_max, bw_max = arr.shape[0] // 8, arr.shape[1] // 8
+    if vectorized:
+        blocks_4d = (arr[: bh_max * 8, : bw_max * 8] - 128.0).reshape(bh_max, 8, bw_max, 8).swapaxes(1, 2)
+        return np.matmul(np.matmul(_DCT8_M, blocks_4d), _DCT8_MT)
+
+    out = np.empty((bh_max, bw_max, 8, 8), dtype=np.float64)
+    for by in range(bh_max):
+        y0 = by * 8
+        for bx in range(bw_max):
+            x0 = bx * 8
+            blk = arr[y0 : y0 + 8, x0 : x0 + 8] - 128.0
+            out[by, bx] = (_DCT8_M @ blk) @ _DCT8_MT
+    return out
+
+
+def idct2_blocks_8x8(dct_blocks: np.ndarray, vectorized: bool = True) -> np.ndarray:
+    """
+    Inverse 8x8 Type-II DCT transform from shape (bh_max, bw_max, 8, 8) back to a 2D
+    spatial plane of shape (bh_max * 8, bw_max * 8) via 4D tensor contraction
+    (`vectorized=True`) or explicit Python 8x8 block-loop iteration (`vectorized=False`).
+    """
+    bh_max, bw_max = dct_blocks.shape[0], dct_blocks.shape[1]
+    if vectorized:
+        rec_4d = np.matmul(np.matmul(_DCT8_MT, dct_blocks), _DCT8_M) + 128.0
+        return rec_4d.swapaxes(1, 2).reshape(bh_max * 8, bw_max * 8)
+
+    out = np.empty((bh_max * 8, bw_max * 8), dtype=np.float64)
+    for by in range(bh_max):
+        y0 = by * 8
+        for bx in range(bw_max):
+            x0 = bx * 8
+            out[y0 : y0 + 8, x0 : x0 + 8] = ((_DCT8_MT @ dct_blocks[by, bx]) @ _DCT8_M) + 128.0
+    return out
+
+
+def should_use_row_shift_interleave(
+    width: int,
+    num_midband_coords: int = 4,
+    payload_len: int = 64,
+    row_shift_interleave: Optional[bool] = None,
+) -> bool:
+    """
+    Evaluate the row-shifted QIM mapping trigger:
+        gcd(4 * floor(W / 8), 64) == 64
+    for M_coord = 4 when `row_shift_interleave is None`.
+    - At W in {128, 256, 512}, floor(W/8) in {16, 32, 64}, so gcd(4*floor(W/8), 64) == 64 -> True,
+      preventing vertical column alignment of identical bit indices while preserving exact uniform
+      multiplicity R = 4B/64.
+    - At W = 64, floor(W/8) = 8, so gcd(32, 64) = 32 != 64 -> False, because unshifted
+      phi(b,m) = (4b + m) mod 64 already shifts consecutive block rows by 32 (mod 64) while
+      preserving exact uniform multiplicity R = 4.
+    """
+    if row_shift_interleave is not None:
+        return bool(row_shift_interleave)
+    if num_midband_coords != 4 or payload_len <= 0:
+        return False
+    bw_max = int(width) // 8
+    return math.gcd(4 * bw_max, payload_len) == payload_len
+
+
+def compute_qim_bit_index(
+    block_idx: int,
+    by: int,
+    m_idx: int,
+    num_midband_coords: int = 4,
+    payload_len: int = 64,
+    use_row_shift: bool = False,
+) -> int:
+    """Compute bit index phi(b, m) or phi_row(b, m) = (M_coord * b + 4 * r_b + m) mod payload_len."""
+    row_off = (4 * by) if use_row_shift else 0
+    return (num_midband_coords * block_idx + row_off + m_idx) % payload_len
+
+
 def _derive_qim_dither_matrix(
     num_blocks: int,
     num_coords: int,
@@ -600,14 +907,23 @@ def _derive_qim_dither_matrix(
 ) -> np.ndarray:
     """
     Derive an optional keyed pseudo-random dither matrix d_{b,m} in [0, qim_step)
-    from `secret_key` to prevent watermark-aware attackers from re-quantizing onto
-    an unkeyed lattice. Defaults to zero when `secret_key is None`.
+    via the exact specification:
+        d_{b,m}(K_secret) = Delta_QIM * (uint32_be(HMAC-SHA256(K_secret, pack(">II", b, m))[:4]) / 2^32).
+    Defaults to zero when `secret_key is None` (unkeyed public audit mode).
     """
+    n_blk = max(1, num_blocks)
     if secret_key is None:
-        return np.zeros((max(1, num_blocks), num_coords), dtype=np.float64)
-    seed_int = int.from_bytes(hashlib.sha256(secret_key).digest()[:8], "big")
-    rng = np.random.default_rng(seed_int)
-    return rng.uniform(0.0, qim_step, size=(max(1, num_blocks), num_coords))
+        return np.zeros((n_blk, num_coords), dtype=np.float64)
+    out = np.empty((n_blk, num_coords), dtype=np.float64)
+    base_mac = hmac.new(secret_key, b"", hashlib.sha256)
+    scale = float(qim_step) / float(1 << 32)
+    for b in range(n_blk):
+        for m in range(num_coords):
+            mac = base_mac.copy()
+            mac.update(struct.pack(">II", b, m))
+            u32 = struct.unpack(">I", mac.digest()[:4])[0]
+            out[b, m] = float(u32) * scale
+    return out
 
 
 def compute_dct8_ac_l1_rounding_bounds() -> Dict[str, float]:
@@ -641,14 +957,16 @@ def embed_midband_dct_watermark(
     qim_step: float = 14.0,
     num_midband_coords: int = 4,
     secret_key: Optional[bytes] = None,
-    row_shift_interleave: bool = False,
+    row_shift_interleave: Optional[bool] = None,
+    vectorized: bool = True,
 ) -> np.ndarray:
     """
     Embed a binary provenance watermark into the floating-point ITU-R BT.601 luminance
     channel Y = 0.299R + 0.587G + 0.114B in [0, 255] of an sRGB image using Quantization
     Index Modulation (QIM) at mid-band 8x8 2D-DCT coefficients with block-interleaved
-    bit indexing i = (M_coord * b + m) mod payload_len (or row-shifted
-    i = (M_coord * b + 4 * by + m) mod payload_len when `row_shift_interleave=True`).
+    bit indexing i = (M_coord * b + m) mod payload_len, or row-shifted
+    i = (M_coord * b + 4 * by + m) mod payload_len whenever `row_shift_interleave=True`
+    or automatically when `row_shift_interleave is None` and `gcd(4 * floor(W/8), 64) == 64`.
     When `num_midband_coords == 1`, embeds 1 mode per block across the first `payload_len`
     blocks (Single-Block Blind QIM baseline R = 1 without multi-block repetition).
     """
@@ -665,6 +983,7 @@ def embed_midband_dct_watermark(
     else:
         coords = _MIDBAND_COORDS
     m_count = len(coords)
+    use_row_shift = should_use_row_shift_interleave(w, m_count, n_bits, row_shift_interleave)
 
     # Retain floating-point ITU-R BT.601 luminance without intermediate integer rounding
     y_chan = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
@@ -673,36 +992,54 @@ def embed_midband_dct_watermark(
     bh_max = h // 8
     bw_max = w // 8
     total_blocks = bh_max * bw_max
+    if total_blocks == 0:
+        return srgb_img.copy()
     dither_mat = _derive_qim_dither_matrix(total_blocks, m_count, qim_step, secret_key)
-    block_idx = 0
 
-    for by in range(bh_max):
-        for bx in range(bw_max):
-            if num_midband_coords == 1 and block_idx >= n_bits:
-                break
-            y0, x0 = by * 8, bx * 8
-            block = y_mod[y0 : y0 + 8, x0 : x0 + 8] - 128.0
-            dct_block = _DCT8_M @ block @ _DCT8_MT
+    if vectorized:
+        dct_4d = dct2_blocks_8x8(y_mod, vectorized=True)
+        dct_flat = dct_4d.reshape(total_blocks, 8, 8)
+        n_active = min(total_blocks, n_bits) if num_midband_coords == 1 else total_blocks
+        b_idx = np.arange(n_active, dtype=np.int64)
+        by_idx = b_idx // bw_max
+        row_off = (4 * by_idx) if use_row_shift else 0
+        bits_arr = np.asarray(payload_bits, dtype=np.int64) & 1
 
-            for m_idx, (u, v) in enumerate(coords):
-                row_off = (4 * by) if row_shift_interleave else 0
-                bit_pos = (m_count * block_idx + row_off + m_idx) % n_bits
-                bit = int(payload_bits[bit_pos]) & 1
-                coeff = dct_block[u, v]
-                # Dithered QIM quantization with half-up rounding floor(x + 0.5)
-                dither = dither_mat[block_idx, m_idx] + (qim_step / 2.0) * bit
-                quantized = math.floor(((coeff - dither) / qim_step) + 0.5) * qim_step + dither
-                dct_block[u, v] = quantized
+        for m_idx, (u, v) in enumerate(coords):
+            bit_pos = (m_count * b_idx + row_off + m_idx) % n_bits
+            w_bits = bits_arr[bit_pos]
+            coeffs = dct_flat[:n_active, u, v]
+            dither = dither_mat[:n_active, m_idx] + (qim_step / 2.0) * w_bits
+            dct_flat[:n_active, u, v] = np.floor(((coeffs - dither) / qim_step) + 0.5) * qim_step + dither
 
-            rec_block = (_DCT8_MT @ dct_block @ _DCT8_M) + 128.0
-            y_mod[y0 : y0 + 8, x0 : x0 + 8] = rec_block
-            block_idx += 1
+        y_mod[: bh_max * 8, : bw_max * 8] = idct2_blocks_8x8(
+            dct_flat.reshape(bh_max, bw_max, 8, 8), vectorized=True
+        )
+    else:
+        block_idx = 0
+        for by in range(bh_max):
+            for bx in range(bw_max):
+                if num_midband_coords == 1 and block_idx >= n_bits:
+                    break
+                y0, x0 = by * 8, bx * 8
+                block = y_mod[y0 : y0 + 8, x0 : x0 + 8] - 128.0
+                dct_block = _DCT8_M @ block @ _DCT8_MT
+
+                for m_idx, (u, v) in enumerate(coords):
+                    bit_pos = compute_qim_bit_index(block_idx, by, m_idx, m_count, n_bits, use_row_shift)
+                    bit = int(payload_bits[bit_pos]) & 1
+                    coeff = dct_block[u, v]
+                    dither = dither_mat[block_idx, m_idx] + (qim_step / 2.0) * bit
+                    quantized = math.floor(((coeff - dither) / qim_step) + 0.5) * qim_step + dither
+                    dct_block[u, v] = quantized
+
+                rec_block = (_DCT8_MT @ dct_block @ _DCT8_M) + 128.0
+                y_mod[y0 : y0 + 8, x0 : x0 + 8] = rec_block
+                block_idx += 1
 
     # Add luminance delta equally across R, G, B and round/clamp to uint8 {0..255}
     delta_y = y_mod - y_chan
-    for ch in range(3):
-        img[..., ch] = np.clip(np.round(img[..., ch] + delta_y), 0, 255)
-
+    img = np.clip(np.round(img + delta_y[..., None]), 0, 255)
     return img.astype(np.uint8)
 
 
@@ -714,12 +1051,13 @@ def extract_midband_dct_watermark(
     secret_key: Optional[bytes] = None,
     return_hard_vote_stats: bool = False,
     voting_mode: str = "clipped_soft",
-    row_shift_interleave: bool = False,
+    row_shift_interleave: Optional[bool] = None,
+    vectorized: bool = True,
 ) -> Any:
     """
     Blindly extract the embedded payload_len-bit watermark from mid-band 8x8 DCT
     coefficients via bounded/clipped soft-margin (`voting_mode="clipped_soft"`, where each
-    block's coset distance margin is bounded in [0, 1]) or hard-decision majority voting
+    block's coset vote is bounded in [0, 1]) or hard-decision majority voting
     (`voting_mode="hard"`) across R interleaved blocks.
     Returns `(extracted_bits, mean_confidence)` by default, or
     `(extracted_bits, mean_confidence, raw_hard_votes_zero, raw_hard_votes_one)`
@@ -736,6 +1074,7 @@ def extract_midband_dct_watermark(
     else:
         coords = _MIDBAND_COORDS
     m_count = len(coords)
+    use_row_shift = should_use_row_shift_interleave(w, m_count, payload_len, row_shift_interleave)
 
     votes_zero = np.zeros(payload_len, dtype=np.float64)
     votes_one = np.zeros(payload_len, dtype=np.float64)
@@ -746,37 +1085,57 @@ def extract_midband_dct_watermark(
     bw_max = w // 8
     total_blocks = bh_max * bw_max
     dither_mat = _derive_qim_dither_matrix(total_blocks, m_count, qim_step, secret_key)
-    block_idx = 0
 
-    for by in range(bh_max):
-        for bx in range(bw_max):
-            if num_midband_coords == 1 and block_idx >= payload_len:
-                break
-            y0, x0 = by * 8, bx * 8
-            block = y_chan[y0 : y0 + 8, x0 : x0 + 8] - 128.0
-            dct_block = _DCT8_M @ block @ _DCT8_MT
+    if vectorized and total_blocks > 0:
+        dct_flat = dct2_blocks_8x8(y_chan, vectorized=True).reshape(total_blocks, 8, 8)
+        n_active = min(total_blocks, payload_len) if num_midband_coords == 1 else total_blocks
+        b_idx = np.arange(n_active, dtype=np.int64)
+        by_idx = b_idx // bw_max
+        row_off = (4 * by_idx) if use_row_shift else 0
 
-            for m_idx, (u, v) in enumerate(coords):
-                row_off = (4 * by) if row_shift_interleave else 0
-                bit_pos = (m_count * block_idx + row_off + m_idx) % payload_len
-                coeff = dct_block[u, v]
-                base_dither = dither_mat[block_idx, m_idx]
-                q0 = math.floor(((coeff - base_dither) / qim_step) + 0.5) * qim_step + base_dither
-                dist0 = abs(coeff - q0)
-                d1 = base_dither + qim_step / 2.0
-                q1 = math.floor(((coeff - d1) / qim_step) + 0.5) * qim_step + d1
-                dist1 = abs(coeff - q1)
-                # Clipped coset vote in [0, 1] per block prevents any single tampered block
-                # from contributing weight > 1.0
-                clipped_margin = min(1.0, max(0.0, abs(dist1 - dist0) / (qim_step * 0.5 + 1e-9)))
-                if dist0 <= dist1:
-                    votes_zero[bit_pos] += clipped_margin
-                    hard_zero[bit_pos] += 1
-                else:
-                    votes_one[bit_pos] += clipped_margin
-                    hard_one[bit_pos] += 1
+        for m_idx, (u, v) in enumerate(coords):
+            bit_pos = (m_count * b_idx + row_off + m_idx) % payload_len
+            coeffs = dct_flat[:n_active, u, v]
+            base_dither = dither_mat[:n_active, m_idx]
+            q0 = np.floor(((coeffs - base_dither) / qim_step) + 0.5) * qim_step + base_dither
+            dist0 = np.abs(coeffs - q0)
+            d1 = base_dither + qim_step / 2.0
+            q1 = np.floor(((coeffs - d1) / qim_step) + 0.5) * qim_step + d1
+            dist1 = np.abs(coeffs - q1)
+            clipped_margin = np.clip(np.abs(dist1 - dist0) / (qim_step * 0.5 + 1e-9), 0.0, 1.0)
+            is_zero = dist0 <= dist1
+            np.add.at(votes_zero, bit_pos, np.where(is_zero, clipped_margin, 0.0))
+            np.add.at(votes_one, bit_pos, np.where(~is_zero, clipped_margin, 0.0))
+            np.add.at(hard_zero, bit_pos, is_zero.astype(np.int32))
+            np.add.at(hard_one, bit_pos, (~is_zero).astype(np.int32))
+    else:
+        block_idx = 0
+        for by in range(bh_max):
+            for bx in range(bw_max):
+                if num_midband_coords == 1 and block_idx >= payload_len:
+                    break
+                y0, x0 = by * 8, bx * 8
+                block = y_chan[y0 : y0 + 8, x0 : x0 + 8] - 128.0
+                dct_block = _DCT8_M @ block @ _DCT8_MT
 
-            block_idx += 1
+                for m_idx, (u, v) in enumerate(coords):
+                    bit_pos = compute_qim_bit_index(block_idx, by, m_idx, m_count, payload_len, use_row_shift)
+                    coeff = dct_block[u, v]
+                    base_dither = dither_mat[block_idx, m_idx]
+                    q0 = math.floor(((coeff - base_dither) / qim_step) + 0.5) * qim_step + base_dither
+                    dist0 = abs(coeff - q0)
+                    d1 = base_dither + qim_step / 2.0
+                    q1 = math.floor(((coeff - d1) / qim_step) + 0.5) * qim_step + d1
+                    dist1 = abs(coeff - q1)
+                    clipped_margin = min(1.0, max(0.0, abs(dist1 - dist0) / (qim_step * 0.5 + 1e-9)))
+                    if dist0 <= dist1:
+                        votes_zero[bit_pos] += clipped_margin
+                        hard_zero[bit_pos] += 1
+                    else:
+                        votes_one[bit_pos] += clipped_margin
+                        hard_one[bit_pos] += 1
+
+                block_idx += 1
 
     extracted: List[int] = []
     confidences: List[float] = []
@@ -809,6 +1168,7 @@ def measure_qim_export_self_noise(
     qim_step: float = 14.0,
     num_midband_coords: int = 4,
     secret_key: Optional[bytes] = None,
+    row_shift_interleave: Optional[bool] = None,
 ) -> Dict[str, float]:
     """
     Quantify the deterministic export self-perturbation eta_b^export(u, v) introduced
@@ -823,22 +1183,24 @@ def measure_qim_export_self_noise(
         qim_step=qim_step,
         num_midband_coords=num_midband_coords,
         secret_key=secret_key,
+        row_shift_interleave=row_shift_interleave,
     )
     img = np.asarray(wm_rgb, dtype=np.float64)
     h, w, _ = img.shape
     y_out = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
     n_bits = len(payload_bits)
+    use_row_shift = should_use_row_shift_interleave(w, m_count, n_bits, row_shift_interleave)
     bh_max, bw_max = h // 8, w // 8
     dither_mat = _derive_qim_dither_matrix(bh_max * bw_max, m_count, qim_step, secret_key)
+    dct_4d = dct2_blocks_8x8(y_out, vectorized=True)
 
     errors: List[float] = []
     block_idx = 0
     for by in range(bh_max):
         for bx in range(bw_max):
-            y0, x0 = by * 8, bx * 8
-            dct_block = _DCT8_M @ (y_out[y0 : y0 + 8, x0 : x0 + 8] - 128.0) @ _DCT8_MT
+            dct_block = dct_4d[by, bx]
             for m_idx, (u, v) in enumerate(coords):
-                bit_pos = (m_count * block_idx + m_idx) % n_bits
+                bit_pos = compute_qim_bit_index(block_idx, by, m_idx, m_count, n_bits, use_row_shift)
                 w_bit = int(payload_bits[bit_pos]) & 1
                 dither = dither_mat[block_idx, m_idx] + (qim_step / 2.0) * w_bit
                 coeff = dct_block[u, v]
@@ -872,7 +1234,8 @@ def localize_dct_qim_tamper_blocks(
     secret_key: Optional[bytes] = None,
     payload_len: int = 64,
     voting_mode: str = "hard",
-    row_shift_interleave: bool = False,
+    row_shift_interleave: Optional[bool] = None,
+    vectorized: bool = True,
 ) -> List[Tuple[int, int]]:
     """
     Localize spatial tampering to specific 8x8 DCT blocks (by, bx) by evaluating
@@ -895,6 +1258,7 @@ def localize_dct_qim_tamper_blocks(
             secret_key=secret_key,
             voting_mode=voting_mode,
             row_shift_interleave=row_shift_interleave,
+            vectorized=vectorized,
         )
 
     coords = _MIDBAND_COORDS_5 if num_midband_coords == 5 else _MIDBAND_COORDS
@@ -904,20 +1268,19 @@ def localize_dct_qim_tamper_blocks(
     h, w, _ = img.shape
     y_chan = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
     n_bits = len(expected_bits)
+    use_row_shift = should_use_row_shift_interleave(w, m_count, n_bits, row_shift_interleave)
     bh_max, bw_max = h // 8, w // 8
     dither_mat = _derive_qim_dither_matrix(bh_max * bw_max, m_count, qim_step, secret_key)
+    dct_4d = dct2_blocks_8x8(y_chan, vectorized=vectorized)
 
     tampered_blocks: List[Tuple[int, int]] = []
     block_idx = 0
     for by in range(bh_max):
         for bx in range(bw_max):
-            y0, x0 = by * 8, bx * 8
-            block = y_chan[y0 : y0 + 8, x0 : x0 + 8] - 128.0
-            dct_block = _DCT8_M @ block @ _DCT8_MT
+            dct_block = dct_4d[by, bx]
             deviations: List[float] = []
             for m_idx, (u, v) in enumerate(coords):
-                row_off = (4 * by) if row_shift_interleave else 0
-                bit_pos = (m_count * block_idx + row_off + m_idx) % n_bits
+                bit_pos = compute_qim_bit_index(block_idx, by, m_idx, m_count, n_bits, use_row_shift)
                 w_bit = int(expected_bits[bit_pos]) & 1
                 dither = dither_mat[block_idx, m_idx] + (qim_step / 2.0) * w_bit
                 coeff = dct_block[u, v]
@@ -1047,7 +1410,11 @@ def _make_png_chunk(chunk_type: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
 
 
-def encode_rgb_to_png_bytes(rgb: np.ndarray, cabx_jumbf_payload: Optional[bytes] = None) -> bytes:
+def encode_rgb_to_png_bytes(
+    rgb: np.ndarray,
+    cabx_jumbf_payload: Optional[bytes] = None,
+    vectorized: bool = True,
+) -> bytes:
     """
     Deterministically encode a uint8 RGB array (H, W, 3) into a compliant PNG binary,
     optionally injecting the compact ISO/IEC 19566-5 C2PA-inspired JUMBF `caBX` chunk
@@ -1068,11 +1435,18 @@ def encode_rgb_to_png_bytes(rgb: np.ndarray, cabx_jumbf_payload: Optional[bytes]
         chunks.append(_make_png_chunk(b"caBX", cabx_jumbf_payload))
 
     # 3. IDAT chunk (filter type 0 per scanline)
-    raw_scanlines = bytearray()
-    for y in range(h):
-        raw_scanlines.append(0)  # Filter type 0 (None)
-        raw_scanlines.extend(arr[y].tobytes())
-    compressed_idat = zlib.compress(bytes(raw_scanlines), level=6)
+    if vectorized:
+        scanlines = np.concatenate(
+            [np.zeros((h, 1), dtype=np.uint8), arr.reshape(h, w * 3)],
+            axis=1,
+        ).tobytes()
+        compressed_idat = zlib.compress(scanlines, level=6)
+    else:
+        raw_scanlines = bytearray()
+        for y in range(h):
+            raw_scanlines.append(0)  # Filter type 0 (None)
+            raw_scanlines.extend(arr[y].tobytes())
+        compressed_idat = zlib.compress(bytes(raw_scanlines), level=6)
     chunks.append(_make_png_chunk(b"IDAT", compressed_idat))
 
     # 4. IEND chunk (0B payload + 12B framing = 12B total)
@@ -1272,6 +1646,53 @@ def verify_png_c2pa_and_dct_provenance(
     )
 
 
+def compute_motion_innovation_gate(
+    mot_diff_lstar: np.ndarray,
+    temporal_ema_beta: float = 0.78,
+    motion_gate_sigma: float = 35.0,
+) -> np.ndarray:
+    """
+    Compute the continuous (C^0) hinged excess-innovation temporal EMA gate:
+        beta_t(u, v) = beta * exp( - (max(0, Delta_mot^(t)(u,v) - sigma_mot))^2 / (2 * sigma_mot^2) ).
+    At Delta_mot <= sigma_mot, beta_t(u,v) == beta identically; above sigma_mot, beta_t
+    decays smoothly and continuously without a step discontinuity at Delta_mot == sigma_mot.
+    """
+    excess = np.maximum(0.0, np.asarray(mot_diff_lstar, dtype=np.float64) - float(motion_gate_sigma))
+    denom = 2.0 * (float(motion_gate_sigma) ** 2) + 1e-12
+    return float(temporal_ema_beta) * np.exp(-(excess ** 2) / denom)
+
+
+def fold_merkle_digests_sha256(frame_hashes_or_digests: Sequence[Union[bytes, str]]) -> str:
+    """
+    Fold frame SHA-256 digests into a binary Merkle root by hashing concatenated raw 32-byte
+    binary digests SHA256(h_{2k-1} || h_{2k}) (duplicating the final digest at any level with
+    an odd node count when T is not a power of 2).
+    Accepts either raw 32-byte `bytes` digests or 64-character hex strings.
+    """
+    if len(frame_hashes_or_digests) == 0:
+        return hashlib.sha256(b"").hexdigest()
+    layer: List[bytes] = []
+    for item in frame_hashes_or_digests:
+        if isinstance(item, bytes):
+            if len(item) != 32:
+                raise ValueError(f"Expected 32-byte raw SHA-256 digest, got {len(item)} bytes")
+            layer.append(item)
+        else:
+            raw = bytes.fromhex(str(item))
+            if len(raw) != 32:
+                raise ValueError(f"Expected 32-byte hex SHA-256 digest, got {len(raw)} bytes")
+            layer.append(raw)
+
+    while len(layer) > 1:
+        next_layer: List[bytes] = []
+        for i in range(0, len(layer), 2):
+            left = layer[i]
+            right = layer[i + 1] if i + 1 < len(layer) else left
+            next_layer.append(hashlib.sha256(left + right).digest())
+        layer = next_layer
+    return layer[0].hex()
+
+
 # ---------------------------------------------------------------------------
 # 7. Closed-Loop Agent-GhibliLock Wavelet-Locked Compiler Pipeline
 # ---------------------------------------------------------------------------
@@ -1314,6 +1735,8 @@ class AgentGhibliLockCompiler:
       - Decoupled (tau_gamma, tau_alpha) closed-loop solver that holds gamma_tau fixed once
         SSIM_edge >= tau_struct while advancing alpha_tau and applying lightweight post-Step-B
         coarse LL_K quantile re-anchoring whenever W_hat_2^StepB > tau_color.
+      - Vectorized 4D tensor-contraction execution (`vectorized=True`) alongside explicit
+        block-loop audit execution (`vectorized=False`).
     """
 
     def __init__(
@@ -1342,18 +1765,25 @@ class AgentGhibliLockCompiler:
         ghibli_prompt_text: str = "Studio Ghibli cel-shaded animation style with warm gouache skies",
         roi_spatial_masking: bool = False,
         roi_mask: Optional[np.ndarray] = None,
+        vectorized: bool = True,
     ) -> GhibliLockCompilationResult:
         t0 = time.perf_counter()
 
         src_lab = srgb_to_lab(src_rgb)
         cand_lab = srgb_to_lab(candidate_rgb)
         style_lab = srgb_to_lab(style_ref_rgb)
+        h, w, _ = src_lab.shape
+        if style_lab.shape[:2] != (h, w):
+            sh, sw = style_lab.shape[:2]
+            yi = (np.arange(h) * sh) // h
+            xi = (np.arange(w) * sw) // w
+            style_lab = style_lab[np.ix_(yi, xi)]
 
         src_lum = src_lab[..., 0]
         cand_lum = cand_lab[..., 0]
         style_lum = style_lab[..., 0]
 
-        _, mask_sha256 = compute_structural_mask_hash(src_lum)
+        _, mask_sha256 = compute_structural_mask_hash(src_lum, vectorized=vectorized)
         active_roi = None
         if roi_spatial_masking or roi_mask is not None:
             active_roi = (
@@ -1362,13 +1792,29 @@ class AgentGhibliLockCompiler:
                 else build_spatial_roi_detail_mask(src_lum, background_floor=0.0)
             )
 
-        pre_ssim = compute_wavelet_edge_ssim(src_lum, cand_lum, roi_mask=active_roi)
-        pre_w2 = compute_sliced_wasserstein_lab(cand_lab, style_lab, swot_steps=self.swot_steps)
+        pre_ssim = compute_wavelet_edge_ssim(
+            src_lum, cand_lum, roi_mask=active_roi, vectorized=vectorized
+        )
+
+        sorted_style_train: Optional[np.ndarray] = None
+        if vectorized:
+            train_axes = _get_swot_training_axes(swot_steps=self.swot_steps, seed=42)
+            sorted_style_train = _sort_slices_rows(
+                (style_lab.reshape(-1, 3) @ train_axes.T).T, vectorized=True
+            )
+
+        pre_w2 = compute_sliced_wasserstein_lab(
+            cand_lab,
+            style_lab,
+            swot_steps=self.swot_steps,
+            vectorized=vectorized,
+            _precomputed_sorted_b=sorted_style_train,
+        )
 
         # Decompose source, candidate, and style luminance via 2D Haar DWT
-        src_dwt = dwt2_multilevel(src_lum, levels=self.wavelet_levels)
-        cand_dwt = dwt2_multilevel(cand_lum, levels=self.wavelet_levels)
-        style_dwt = dwt2_multilevel(style_lum, levels=self.wavelet_levels)
+        src_dwt = dwt2_multilevel(src_lum, levels=self.wavelet_levels, vectorized=vectorized)
+        cand_dwt = dwt2_multilevel(cand_lum, levels=self.wavelet_levels, vectorized=vectorized)
+        style_dwt = dwt2_multilevel(style_lum, levels=self.wavelet_levels, vectorized=vectorized)
 
         # Decoupled closed-loop schedule:
         # tau_gamma controls high-frequency structural detail injection gamma;
@@ -1380,6 +1826,10 @@ class AgentGhibliLockCompiler:
 
         tau_gamma = 0
         tau_alpha = 0
+        cached_tau_alpha: Optional[int] = None
+        cached_transported_lab: Optional[np.ndarray] = None
+        cached_step_a_w2: float = pre_w2
+        cached_trans_dwt: Optional[WaveletDecomposition2D] = None
 
         locked_lab = cand_lab.copy()
         post_ssim = pre_ssim
@@ -1399,17 +1849,35 @@ class AgentGhibliLockCompiler:
             alpha_used = alpha
 
             # Step A: Transport chromaticity & low-frequency luminance via 3D Sliced-Wasserstein
-            transported_lab = transport_chromaticity_wasserstein(
-                cand_lab,
-                style_lab,
-                blend_alpha=alpha,
-                swot_steps=self.swot_steps,
-                anchor_lum_mean=True,
-            )
-            post_step_a_w2 = compute_sliced_wasserstein_lab(
-                transported_lab, style_lab, swot_steps=self.swot_steps
-            )
-            trans_dwt = dwt2_multilevel(transported_lab[..., 0], levels=self.wavelet_levels)
+            # Reused from cache whenever tau_alpha is unchanged from the previous pass
+            if vectorized and cached_tau_alpha == tau_alpha and cached_transported_lab is not None and cached_trans_dwt is not None:
+                transported_lab = cached_transported_lab
+                post_step_a_w2 = cached_step_a_w2
+                trans_dwt = cached_trans_dwt
+            else:
+                transported_lab = transport_chromaticity_wasserstein(
+                    cand_lab,
+                    style_lab,
+                    blend_alpha=alpha,
+                    swot_steps=self.swot_steps,
+                    anchor_lum_mean=True,
+                    vectorized=vectorized,
+                    _precomputed_sorted_targ=sorted_style_train,
+                )
+                post_step_a_w2 = compute_sliced_wasserstein_lab(
+                    transported_lab,
+                    style_lab,
+                    swot_steps=self.swot_steps,
+                    vectorized=vectorized,
+                    _precomputed_sorted_b=sorted_style_train,
+                )
+                trans_dwt = dwt2_multilevel(
+                    transported_lab[..., 0], levels=self.wavelet_levels, vectorized=vectorized
+                )
+                cached_tau_alpha = tau_alpha
+                cached_transported_lab = transported_lab
+                cached_step_a_w2 = post_step_a_w2
+                cached_trans_dwt = trans_dwt
 
             # Step B: Inject high-frequency structural subbands (LH_k, HL_k, HH_k) from source
             # blended with smooth diffusion candidate details (eliminating Step A rank-sort staircasing)
@@ -1453,7 +1921,7 @@ class AgentGhibliLockCompiler:
                 details=fused_details,
                 original_shape=src_dwt.original_shape,
             )
-            raw_fused_lum = idwt2_multilevel(fused_decomp)
+            raw_fused_lum = idwt2_multilevel(fused_decomp, vectorized=vectorized)
 
             # Affine luminance standard-deviation regularization around target_mean_lum:
             # 100% scale-invariant for both SSIM_edge and rho_grad while preventing detail-energy
@@ -1465,25 +1933,25 @@ class AgentGhibliLockCompiler:
             if cur_std_lum > target_std_lum and cur_std_lum > 1e-6:
                 kappa = (1.0 - var_w) + var_w * (target_std_lum / cur_std_lum)
                 raw_fused_lum = target_mean_lum + kappa * (raw_fused_lum - cur_mean_lum)
-            fused_lum = np.clip(raw_fused_lum, 0.0, 100.0)
-            # Post-clamp interior DC re-anchoring so mu(L_hat*) == mu(L_tilde*) exactly (Theorem 1)
-            mean_drift = target_mean_lum - float(np.mean(fused_lum))
-            if abs(mean_drift) > 1e-12:
-                interior = (fused_lum > 1.0) & (fused_lum < 99.0)
-                if np.any(interior):
-                    fused_lum[interior] = np.clip(
-                        fused_lum[interior] + mean_drift * (fused_lum.size / float(np.sum(interior))),
-                        0.0,
-                        100.0,
-                    )
+            fused_lum_clip = np.clip(raw_fused_lum, 0.0, 100.0)
+            # Post-clamp interior DC re-anchoring with |I^o| = 0 guard and per-pixel shift cap 1.0 (Theorem 1)
+            fused_lum, _ = apply_interior_dc_reanchoring(fused_lum_clip, target_mean_lum)
 
             locked_lab = transported_lab.copy()
             locked_lab[..., 0] = fused_lum
 
-            post_ssim = compute_wavelet_edge_ssim(src_lum, fused_lum, roi_mask=active_roi)
-            step_grad_corr = compute_sobel_gradient_correlation(src_lum, fused_lum)
+            post_ssim = compute_wavelet_edge_ssim(
+                src_lum, fused_lum, roi_mask=active_roi, vectorized=vectorized
+            )
+            step_grad_corr = compute_sobel_gradient_correlation(
+                src_lum, fused_lum, vectorized=vectorized
+            )
             post_w2 = compute_sliced_wasserstein_lab(
-                locked_lab, style_lab, swot_steps=self.swot_steps
+                locked_lab,
+                style_lab,
+                swot_steps=self.swot_steps,
+                vectorized=vectorized,
+                _precomputed_sorted_b=sorted_style_train,
             )
 
             struct_ok = (post_ssim >= self.tau_struct) and (step_grad_corr >= 0.88)
@@ -1491,13 +1959,13 @@ class AgentGhibliLockCompiler:
             if struct_ok and color_ok:
                 break
 
-            # Decoupled schedule update:
-            # - Only advance tau_gamma if structural threshold is NOT yet met!
-            # - Advance tau_alpha whenever color threshold is violated (or alongside tau_gamma).
+            # Decoupled schedule update (Section 3.2 Step 3):
+            # - Increment tau_gamma only when SSIM_edge < tau_struct or rho_grad < tau_grad.
+            # - Increment tau_alpha only when W_hat_2^StepB > tau_color, holding tau_alpha fixed
+            #   and reusing cached Step A whenever W_hat_2^StepB <= tau_color.
             if not struct_ok:
                 tau_gamma = min(len(gamma_schedule) - 1, tau_gamma + 1)
-                tau_alpha = min(len(alpha_schedule) - 1, tau_alpha + 1)
-            elif not color_ok:
+            if not color_ok:
                 tau_alpha = min(len(alpha_schedule) - 1, tau_alpha + 1)
 
         pre_watermark_rgb = lab_to_srgb(locked_lab)
@@ -1512,18 +1980,27 @@ class AgentGhibliLockCompiler:
             pre_watermark_rgb,
             wm_bits,
             qim_step=self.qim_step,
+            vectorized=vectorized,
         )
 
         # Evaluate post-Step-B, post-gamut-clamp, post-QIM metrics on final exported sRGB image I_out
         out_lab = srgb_to_lab(watermarked_rgb)
         post_output_w2 = compute_sliced_wasserstein_lab(
-            out_lab, style_lab, swot_steps=self.swot_steps
+            out_lab,
+            style_lab,
+            swot_steps=self.swot_steps,
+            vectorized=vectorized,
+            _precomputed_sorted_b=sorted_style_train,
         )
         eval_heldout_w2 = compute_heldout_sliced_wasserstein_lab(
-            out_lab, style_lab, num_projections=64, seed=999
+            out_lab, style_lab, num_projections=64, seed=999, vectorized=vectorized
         )
-        post_full_ssim = compute_full_luminance_ssim(src_lum, out_lab[..., 0])
-        post_grad_corr = compute_sobel_gradient_correlation(src_lum, out_lab[..., 0])
+        post_full_ssim = compute_full_luminance_ssim(
+            src_lum, out_lab[..., 0], vectorized=vectorized
+        )
+        post_grad_corr = compute_sobel_gradient_correlation(
+            src_lum, out_lab[..., 0], vectorized=vectorized
+        )
 
         # Compute Stage 3 QIM embedding PSNR between pre-watermark Step-B image and watermarked I_out
         mse = float(np.mean((pre_watermark_rgb.astype(np.float64) - watermarked_rgb.astype(np.float64)) ** 2))
@@ -1533,6 +2010,7 @@ class AgentGhibliLockCompiler:
             watermarked_rgb,
             payload_len=64,
             qim_step=self.qim_step,
+            vectorized=vectorized,
         )
         ber = sum(1 for a, b in zip(extracted_bits, wm_bits) if a != b) / 64.0
 
@@ -1563,7 +2041,9 @@ class AgentGhibliLockCompiler:
         }
 
         jumbf_box = build_c2pa_jumbf_manifest_box(c2pa_assertion, self.signing_key)
-        png_bytes = encode_rgb_to_png_bytes(watermarked_rgb, cabx_jumbf_payload=jumbf_box)
+        png_bytes = encode_rgb_to_png_bytes(
+            watermarked_rgb, cabx_jumbf_payload=jumbf_box, vectorized=vectorized
+        )
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return GhibliLockCompilationResult(
@@ -1594,8 +2074,8 @@ class AgentGhibliLockCompiler:
     def _estimate_subband_shift(prev_ll: np.ndarray, cur_ll: np.ndarray, max_shift: int = 4) -> Tuple[int, int]:
         """
         Estimate integer-tile global translation (dy, dx) on LL_K via 2D cross-correlation,
-        requiring a >= 35% MSE reduction relative to (0, 0) to avoid false shifts under
-        pure exposure flicker.
+        breaking ties lexicographically in (|dy| + |dx|, dy, dx) and requiring a >= 35% MSE
+        reduction relative to (0, 0) to avoid false shifts under pure exposure flicker.
         """
         p_norm = prev_ll - float(np.mean(prev_ll))
         c_norm = cur_ll - float(np.mean(cur_ll))
@@ -1604,15 +2084,21 @@ class AgentGhibliLockCompiler:
         best_err = err_zero
         h, w = p_norm.shape
         max_s = min(max_shift, h // 4, w // 4)
-        for dy in range(-max_s, max_s + 1):
-            for dx in range(-max_s, max_s + 1):
-                if dy == 0 and dx == 0:
-                    continue
-                shifted = np.roll(np.roll(p_norm, dy, axis=0), dx, axis=1)
-                err = float(np.mean((c_norm - shifted) ** 2))
-                if err < best_err and err < 0.65 * err_zero:
-                    best_err = err
-                    best_dy, best_dx = dy, dx
+        candidates = sorted(
+            [
+                (dy, dx)
+                for dy in range(-max_s, max_s + 1)
+                for dx in range(-max_s, max_s + 1)
+                if not (dy == 0 and dx == 0)
+            ],
+            key=lambda pair: (abs(pair[0]) + abs(pair[1]), pair[0], pair[1]),
+        )
+        for dy, dx in candidates:
+            shifted = np.roll(np.roll(p_norm, dy, axis=0), dx, axis=1)
+            err = float(np.mean((c_norm - shifted) ** 2))
+            if err < best_err and err < 0.65 * err_zero:
+                best_err = err
+                best_dy, best_dx = dy, dx
         return best_dy, best_dx
 
     def compile_video_gop(
@@ -1628,15 +2114,15 @@ class AgentGhibliLockCompiler:
         """
         Temporal Wavelet-Locked Video GOP Compiler for Veo 3.1.
         Eliminates inter-frame low-frequency luminance flicker via motion-compensated,
-        motion-gated wavelet LL_K exponential moving average (EMA) filtering while
-        locking per-frame high-frequency structural subbands (LH_k, HL_k, HH_k) and
-        computing a C2PA Merkle tree root across all frames in the Group of Pictures (GOP).
+        C^0 hinged motion-innovation-gated wavelet LL_K exponential moving average (EMA)
+        filtering while locking per-frame high-frequency structural subbands (LH_k, HL_k, HH_k)
+        and computing a binary C2PA Merkle tree root over raw 32-byte frame digests.
         """
         assert len(src_frames_rgb) == len(candidate_frames_rgb) and len(src_frames_rgb) > 0
         t0 = time.perf_counter()
 
         compiled_frames: List[np.ndarray] = []
-        frame_hashes: List[str] = []
+        frame_digests_raw: List[bytes] = []
         pre_ssim_list: List[float] = []
         post_ssim_list: List[float] = []
         pre_ll_tiles: List[np.ndarray] = []
@@ -1673,7 +2159,7 @@ class AgentGhibliLockCompiler:
             trans_dwt = dwt2_multilevel(trans_lab[..., 0], levels=self.wavelet_levels)
             pre_ll_tiles.append(trans_dwt.ll.copy())
 
-            # Motion-compensated and motion-gated temporal EMA smoothing on coarse LL_K subband
+            # Motion-compensated and C^0 hinged motion-innovation-gated temporal EMA on coarse LL_K
             if prev_ll is None or prev_src_ll is None:
                 smooth_ll = trans_dwt.ll.copy()
             else:
@@ -1684,10 +2170,10 @@ class AgentGhibliLockCompiler:
                     warped_prev_ll = np.roll(np.roll(prev_ll, dy_s, axis=0), dx_s, axis=1)
                     # Convert subband difference to L* [0, 100] scale via 2^(-K)
                     mot_diff_lstar = np.abs(src_dwt.ll - warped_prev_src) / scale_k
-                    beta_map = np.where(
-                        mot_diff_lstar > motion_gate_sigma,
-                        temporal_ema_beta * np.exp(-(mot_diff_lstar ** 2) / (2.0 * (motion_gate_sigma ** 2))),
-                        temporal_ema_beta,
+                    beta_map = compute_motion_innovation_gate(
+                        mot_diff_lstar,
+                        temporal_ema_beta=temporal_ema_beta,
+                        motion_gate_sigma=motion_gate_sigma,
                     )
                     smooth_ll = beta_map * warped_prev_ll + (1.0 - beta_map) * trans_dwt.ll
                     smooth_ll += target_ll_mean - float(np.mean(smooth_ll))
@@ -1710,24 +2196,16 @@ class AgentGhibliLockCompiler:
                 )
             )
             preclamp_means.append(float(np.mean(raw_lum)))
-            fused_lum = np.clip(raw_lum, 0.0, 100.0)
-            # Interior post-clamp DC re-anchoring
-            drift = ref_mean_lum - float(np.mean(fused_lum))
-            if abs(drift) > 1e-12:
-                interior = (fused_lum > 1.0) & (fused_lum < 99.0)
-                if np.any(interior):
-                    fused_lum[interior] = np.clip(
-                        fused_lum[interior] + drift * (fused_lum.size / float(np.sum(interior))),
-                        0.0,
-                        100.0,
-                    )
+            fused_lum_clip = np.clip(raw_lum, 0.0, 100.0)
+            # Interior post-clamp DC re-anchoring with |I^o| = 0 guard and per-pixel shift cap 1.0
+            fused_lum, _ = apply_interior_dc_reanchoring(fused_lum_clip, ref_mean_lum)
             post_ssim_list.append(compute_wavelet_edge_ssim(src_lab[..., 0], fused_lum))
 
             out_lab = trans_lab.copy()
             out_lab[..., 0] = fused_lum
             out_rgb = lab_to_srgb(out_lab)
             compiled_frames.append(out_rgb)
-            frame_hashes.append(hashlib.sha256(out_rgb.tobytes()).hexdigest())
+            frame_digests_raw.append(hashlib.sha256(out_rgb.tobytes()).digest())
 
         post_preclamp_flicker_var = (
             float(np.var(np.diff(preclamp_means))) if len(preclamp_means) > 1 else 0.0
@@ -1742,16 +2220,8 @@ class AgentGhibliLockCompiler:
         pre_local_ll_var = float(np.mean(np.var(pre_ll_arr, axis=0)))
         post_local_ll_var = float(np.mean(np.var(post_ll_arr, axis=0)))
 
-        # Compute binary Merkle root over frame hashes for MP4 C2PA `uuid` box
-        layer = [bytes.fromhex(h) for h in frame_hashes]
-        while len(layer) > 1:
-            next_layer: List[bytes] = []
-            for i in range(0, len(layer), 2):
-                left = layer[i]
-                right = layer[i + 1] if i + 1 < len(layer) else left
-                next_layer.append(hashlib.sha256(left + right).digest())
-            layer = next_layer
-        gop_merkle_root = layer[0].hex()
+        # Compute binary Merkle root over raw 32-byte frame SHA-256 digests for MP4 C2PA `uuid` box
+        gop_merkle_root = fold_merkle_digests_sha256(frame_digests_raw)
 
         return {
             "compiled_frames": compiled_frames,

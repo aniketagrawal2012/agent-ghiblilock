@@ -17,9 +17,11 @@ Comprehensive Unit & Adversarial Test Suite for Agent-GhibliLock:
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import struct
+import time
 import unittest
 import zlib
 import numpy as np
@@ -27,18 +29,24 @@ import numpy as np
 from ghiblilock_engine import (
     AgentGhibliLockCompiler,
     WaveletDecomposition2D,
+    _derive_qim_dither_matrix,
+    apply_interior_dc_reanchoring,
     bits_to_bytes,
     build_spatial_roi_detail_mask,
     bytes_to_bits,
     compute_dct8_ac_l1_rounding_bounds,
     compute_full_luminance_ssim,
     compute_heldout_sliced_wasserstein_lab,
+    compute_motion_innovation_gate,
     compute_parseval_wavelet_energies,
+    compute_qim_bit_index,
     compute_sliced_wasserstein_lab,
+    compute_sobel_coherence_5x5,
     compute_sobel_gradient_correlation,
     compute_structural_edge_map,
     compute_structural_mask_hash,
     compute_wavelet_edge_ssim,
+    dct2_blocks_8x8,
     deflicker_video_gop_baselines,
     dwt2_multilevel,
     embed_cox_spread_spectrum_dct,
@@ -46,10 +54,13 @@ from ghiblilock_engine import (
     encode_rgb_to_png_bytes,
     extract_cox_spread_spectrum_dct,
     extract_midband_dct_watermark,
+    fold_merkle_digests_sha256,
+    idct2_blocks_8x8,
     idwt2_multilevel,
     lab_to_srgb,
     localize_dct_qim_tamper_blocks,
     measure_qim_export_self_noise,
+    should_use_row_shift_interleave,
     srgb_to_lab,
     transport_chromaticity_wasserstein,
     verify_png_c2pa_and_dct_provenance,
@@ -659,7 +670,217 @@ class TestAgentGhibliLock(unittest.TestCase):
         # Both gated and ungated wavelet EMA eliminate global pre-clamp luminance flicker
         self.assertLess(gop_gated["post_preclamp_flicker_variance"], 1e-12)
 
+    def test_25_vectorized_4d_tensor_contraction_vs_block_loop_precision_and_512_speedup(self) -> None:
+        """
+        Verify (#37):
+        - 4D tensor-contraction NumPy execution for 2D Haar DWT/IDWT and 8x8 block-DCT/IDCT
+          matches explicit block-loop execution to machine precision (< 1e-11).
+        - Vectorized 512x512 compilation accelerates execution by > 5x over block-loop execution.
+        """
+        rng = np.random.default_rng(2026)
+        plane_512 = rng.uniform(0.0, 100.0, size=(512, 512)).astype(np.float64)
+
+        # 1. Multi-level 2D Haar DWT/IDWT: 4D tensor contraction vs 2x2 block-loop
+        t0 = time.perf_counter()
+        dwt_vec = dwt2_multilevel(plane_512, levels=2, vectorized=True)
+        rec_dwt_vec = idwt2_multilevel(dwt_vec, vectorized=True)
+        dt_dwt_vec = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        dwt_loop = dwt2_multilevel(plane_512, levels=2, vectorized=False)
+        rec_dwt_loop = idwt2_multilevel(dwt_loop, vectorized=False)
+        dt_dwt_loop = time.perf_counter() - t0
+
+        self.assertLess(float(np.max(np.abs(dwt_vec.ll - dwt_loop.ll))), 1e-11)
+        for lvl in range(2):
+            for sb_v, sb_l in zip(dwt_vec.details[lvl], dwt_loop.details[lvl]):
+                self.assertLess(float(np.max(np.abs(sb_v - sb_l))), 1e-11)
+        self.assertLess(float(np.max(np.abs(rec_dwt_vec - rec_dwt_loop))), 1e-11)
+        self.assertLess(float(np.max(np.abs(rec_dwt_vec - plane_512))), 1e-11)
+        self.assertGreater(dt_dwt_loop / max(dt_dwt_vec, 1e-9), 5.0)
+
+        # 2. 8x8 Block-DCT/IDCT: 4D tensor contraction vs 8x8 block-loop
+        t0 = time.perf_counter()
+        dct_vec = dct2_blocks_8x8(plane_512, vectorized=True)
+        rec_dct_vec = idct2_blocks_8x8(dct_vec, vectorized=True)
+        dt_dct_vec = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        dct_loop = dct2_blocks_8x8(plane_512, vectorized=False)
+        rec_dct_loop = idct2_blocks_8x8(dct_loop, vectorized=False)
+        dt_dct_loop = time.perf_counter() - t0
+
+        self.assertLess(float(np.max(np.abs(dct_vec - dct_loop))), 1e-11)
+        self.assertLess(float(np.max(np.abs(rec_dct_vec - rec_dct_loop))), 1e-11)
+        self.assertLess(float(np.max(np.abs(rec_dct_vec - plane_512))), 1e-11)
+        self.assertGreater(dt_dct_loop / max(dt_dct_vec, 1e-9), 3.0)
+
+        # 3. Full 512x512 AgentGhibliLockCompiler.compile speedup (> 5x) and bit-exact equivalence
+        src_512 = _create_synthetic_scene_with_logo_and_rail(512, 512)
+        cand_512 = _create_unconstrained_diffusion_candidate(src_512)
+        style_512 = _create_ghibli_style_palette_reference(512, 512)
+        compiler = AgentGhibliLockCompiler()
+
+        dt_compile_vec = float("inf")
+        res_vec = None
+        for _ in range(2):
+            t0 = time.perf_counter()
+            res_vec = compiler.compile(src_512, cand_512, style_512, vectorized=True)
+            dt_compile_vec = min(dt_compile_vec, time.perf_counter() - t0)
+
+        t0 = time.perf_counter()
+        res_loop = compiler.compile(src_512, cand_512, style_512, vectorized=False)
+        dt_compile_loop = time.perf_counter() - t0
+
+        self.assertTrue(np.array_equal(res_vec.stylized_rgb, res_loop.stylized_rgb))
+        self.assertEqual(
+            res_vec.c2pa_assertion["output_pixel_sha256"],
+            res_loop.c2pa_assertion["output_pixel_sha256"],
+        )
+        self.assertGreater(dt_compile_loop / max(dt_compile_vec, 1e-9), 5.0)
+
+    def test_26_closed_form_roi_coherence_threshold_and_interior_dc_reanchoring_guard(self) -> None:
+        """
+        Verify (#6, #9):
+        - Exact closed-form ROI coherence thresholding (C_{5x5} >= 0.35) zeroes isotropic
+          texture prior to 5x5 (l_inf radius 2 px) morphological dilation and 3x3 box feathering.
+        - Interior DC re-anchoring guard handles |I^circ| = 0 without division-by-zero/NaN
+          and enforces the per-pixel shift cap |delta_DC| <= 1.0.
+        """
+        # 1. Construct an image with an isotropic checkerboard patch (C_{5x5} ~ 0 < 0.35)
+        #    and a sharp unidirectional step edge (C_{5x5} ~ 1 >= 0.35)
+        l_star = np.full((64, 64), 50.0, dtype=np.float64)
+        # Isotropic 1px alternating checkerboard in top-left (away from step edge)
+        yy, xx = np.mgrid[0:16, 0:16]
+        l_star[4:20, 4:20] = 50.0 + 18.0 * (((yy + xx) % 2) * 2 - 1)
+        # Sharp vertical step edge in right half (x = 48)
+        l_star[16:48, 48:] = 90.0
+
+        coherence = compute_sobel_coherence_5x5(l_star)
+        # Inside the isotropic checkerboard interior, X and Y gradients match in energy and cancel in cross-product
+        self.assertLess(float(np.mean(coherence[8:16, 8:16])), 0.15)
+        # Along the unidirectional vertical step edge, coherence is near 1.0 (>= 0.35)
+        self.assertGreater(float(np.mean(coherence[24:40, 47:49])), 0.90)
+
+        w_roi = build_spatial_roi_detail_mask(
+            l_star, background_floor=0.0, dilation_radius=2, coherence_threshold=0.35
+        )
+        # Isotropic checkerboard interior (far from its boundary) is suppressed by C_{5x5} < 0.35
+        self.assertAlmostEqual(float(w_roi[11, 11]), 0.0, places=7)
+        # Step edge achieves high normalized ROI weight (> 0.6 after 3x3 box feathering of 4px dilated strip)
+        self.assertGreater(float(np.max(w_roi)), 0.60)
+
+        # 2. Interior DC re-anchoring guard when |I^circ| == 0 (all pixels saturated <= 1 or >= 99)
+        l_saturated = np.zeros((32, 32), dtype=np.float64)
+        l_saturated[:16, :] = 0.5   # <= 1.0
+        l_saturated[16:, :] = 99.5  # >= 99.0
+        l_anchored_empty, delta_empty = apply_interior_dc_reanchoring(l_saturated, target_mean_lum=45.0)
+        self.assertEqual(delta_empty, 0.0)
+        self.assertTrue(np.all(np.isfinite(l_anchored_empty)))
+        self.assertTrue(np.array_equal(l_anchored_empty, l_saturated))
+
+        # 3. Interior DC re-anchoring cap |delta_DC| <= 1.0 when raw shift > 1.0
+        l_shift = np.zeros((32, 32), dtype=np.float64)
+        l_shift[:16, :] = 100.0  # Saturated (outside I^o = (1, 99))
+        l_shift[16:, :] = 50.0   # Unsaturated interior I^o (mean = 75.0)
+        # Target mean = 70.0 -> Delta_mu = -5.0, HW/|I^o| = 2.0 -> raw shift = -10.0 -> capped at -1.0
+        l_anchored_cap, delta_cap = apply_interior_dc_reanchoring(l_shift, target_mean_lum=70.0)
+        self.assertAlmostEqual(delta_cap, -1.0, places=9)
+        # Interior pixels shifted by -1.0 to 49.0; saturated pixels (100.0) untouched
+        self.assertAlmostEqual(float(l_anchored_cap[24, 16]), 49.0, places=9)
+        self.assertAlmostEqual(float(l_anchored_cap[4, 16]), 100.0, places=9)
+
+    def test_27_c0_hinged_motion_innovation_gate_and_raw_32byte_merkle_folding(self) -> None:
+        """
+        Verify (#5, #10):
+        - Continuous C^0 hinged motion-innovation gate:
+          beta_t(u,v) = beta * exp(-(max(0, Delta_mot - sigma_mot))^2 / (2 * sigma_mot^2)).
+        - Raw 32-byte SHA-256 Merkle tree digest folding with odd-node duplication.
+        """
+        beta = 0.78
+        sigma_mot = 35.0
+        deltas = np.array([0.0, 17.5, 35.0, 35.0 - 1e-7, 35.0 + 1e-7, 70.0, 105.0], dtype=np.float64)
+        gates = compute_motion_innovation_gate(deltas, temporal_ema_beta=beta, motion_gate_sigma=sigma_mot)
+
+        # Flat plateau beta for Delta_mot <= sigma_mot
+        self.assertAlmostEqual(float(gates[0]), beta, places=12)
+        self.assertAlmostEqual(float(gates[1]), beta, places=12)
+        self.assertAlmostEqual(float(gates[2]), beta, places=12)
+        # C^0 continuity across the hinge point Delta_mot = sigma_mot
+        self.assertLess(abs(float(gates[4]) - float(gates[3])), 1e-12)
+        # Exact Gaussian decay above sigma_mot: at Delta_mot = 2*sigma_mot (70.0), excess = sigma_mot -> exp(-0.5)
+        self.assertAlmostEqual(float(gates[5]), beta * np.exp(-0.5), places=12)
+        # At Delta_mot = 3*sigma_mot (105.0), excess = 2*sigma_mot -> exp(-2.0)
+        self.assertAlmostEqual(float(gates[6]), beta * np.exp(-2.0), places=12)
+
+        # Raw 32-byte Merkle tree folding verification (even T=4 and odd T=3)
+        leaf_hexes = [hashlib.sha256(f"frame_{i}".encode("utf-8")).hexdigest() for i in range(4)]
+        raw_leaves = [bytes.fromhex(h) for h in leaf_hexes]
+        # Manual raw 32-byte tree for T=4
+        n01 = hashlib.sha256(raw_leaves[0] + raw_leaves[1]).digest()
+        n23 = hashlib.sha256(raw_leaves[2] + raw_leaves[3]).digest()
+        expected_root_4 = hashlib.sha256(n01 + n23).hexdigest()
+        self.assertEqual(fold_merkle_digests_sha256(leaf_hexes), expected_root_4)
+
+        # Manual raw 32-byte tree for T=3 (odd leaf duplicated at level 0)
+        n22 = hashlib.sha256(raw_leaves[2] + raw_leaves[2]).digest()
+        expected_root_3 = hashlib.sha256(n01 + n22).hexdigest()
+        self.assertEqual(fold_merkle_digests_sha256(leaf_hexes[:3]), expected_root_3)
+
+        # Ensure raw 32-byte folding is distinct from naive ASCII hex concatenation
+        ascii_n01 = hashlib.sha256((leaf_hexes[0] + leaf_hexes[1]).encode("ascii")).hexdigest()
+        self.assertNotEqual(n01.hex(), ascii_n01)
+
+    def test_28_row_shifted_qim_mapping_gcd_trigger_and_hmac_dither(self) -> None:
+        """
+        Verify (#21):
+        - Row-shifted QIM mapping trigger gcd(4 * floor(W/8), 64) == 64 activates automatically
+          when row_shift_interleave is None and M_coord == 4.
+        - All 64 payload bit indices achieve exact uniform multiplicity across 128x128, 256x256,
+          and 512x512 images, and HMAC-SHA256 dither matches specification.
+        """
+        # W = 64 -> floor(W/8) = 8 -> gcd(32, 64) = 32 != 64 -> False
+        self.assertFalse(should_use_row_shift_interleave(width=64, num_midband_coords=4, payload_len=64))
+        # W = 128 -> floor(W/8) = 16 -> gcd(64, 64) = 64 -> True
+        self.assertTrue(should_use_row_shift_interleave(width=128, num_midband_coords=4, payload_len=64))
+        # W = 256 -> floor(W/8) = 32 -> gcd(128, 64) = 64 -> True
+        self.assertTrue(should_use_row_shift_interleave(width=256, num_midband_coords=4, payload_len=64))
+        # W = 512 -> floor(W/8) = 64 -> gcd(256, 64) = 64 -> True
+        self.assertTrue(should_use_row_shift_interleave(width=512, num_midband_coords=4, payload_len=64))
+        # Coprime M_coord = 5 -> False
+        self.assertFalse(should_use_row_shift_interleave(width=128, num_midband_coords=5, payload_len=64))
+
+        # Check exact uniform multiplicity across all 64 bits for W=128, 256, 512 with automatic trigger
+        for dim in (128, 256, 512):
+            bh = bw = dim // 8
+            use_rs = should_use_row_shift_interleave(width=dim, num_midband_coords=4, payload_len=64)
+            self.assertTrue(use_rs)
+            counts = np.zeros(64, dtype=np.int64)
+            block_idx = 0
+            for by in range(bh):
+                for _bx in range(bw):
+                    for m_idx in range(4):
+                        bit_idx = compute_qim_bit_index(block_idx, by, m_idx, 4, 64, use_rs)
+                        counts[bit_idx] += 1
+                    block_idx += 1
+            expected_mult = (bh * bw * 4) // 64
+            self.assertTrue(np.all(counts == expected_mult))
+
+        # Verify HMAC-SHA256 dither matrix matches first 32 bits of HMAC-SHA256(K_secret, pack(">II", b, m))
+        import hmac
+        secret_key = b"test_secret_key_2026"
+        qim_step = 14.0
+        dither = _derive_qim_dither_matrix(64, 4, qim_step, secret_key)
+        self.assertEqual(dither.shape, (64, 4))
+        for b in (0, 17, 63):
+            for m in range(4):
+                mac = hmac.new(secret_key, struct.pack(">II", b, m), hashlib.sha256).digest()
+                u32 = struct.unpack(">I", mac[:4])[0]
+                expected_d = (float(u32) / float(1 << 32)) * qim_step
+                self.assertAlmostEqual(float(dither[b, m]), expected_d, places=12)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
